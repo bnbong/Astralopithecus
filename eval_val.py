@@ -31,6 +31,7 @@ import pandas as pd
 
 LETTERS = list("abcd")
 PROB_COLS = [f"prob_{c}" for c in LETTERS]
+ALT_PROB_COLS = [f"p_{c}" for c in LETTERS]   # 팀원이 p_a~p_d 로 저장한 파일도 읽는다
 
 
 EXT_RE = re.compile(r"\.(jpe?g|png)$", re.IGNORECASE)
@@ -97,6 +98,9 @@ def load_pred(path):
     if "id" not in df.columns:
         raise EvalError(f"예측 파일에 id 컬럼이 없습니다: {list(df.columns)}")
     df["id"] = norm_ids(df["id"])
+
+    if not all(c in df.columns for c in PROB_COLS) and all(c in df.columns for c in ALT_PROB_COLS):
+        df = df.rename(columns=dict(zip(ALT_PROB_COLS, PROB_COLS)))
 
     has_probs = all(c in df.columns for c in PROB_COLS)
     if has_probs:
