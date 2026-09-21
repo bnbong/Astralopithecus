@@ -22,12 +22,14 @@
 # 이 단계가 실패해도 멈추지 않고 경고만 크게 출력한다. `python -m vqa.preflight`의
 # kernel_fast_path 검사가 같은 내용을 WARN으로 다시 알려 준다.
 #
-# 버전은 아직 Colab에서 확인하지 못했다. 한 번 설치한 뒤 `pip show fla-core
-# flash-linear-attention`으로 실제 버전을 확인하고, 그 값으로 여기를 고정한다.
+# 버전은 2026-09-21 A100 Colab에서 확인했다. `import fla; fla.__version__`이 0.5.2였고,
+# torch 2.11.0+cu128과 transformers 5.16.1에서 정상 동작했다. fla-core는 그 자리에서 버전을
+# 확인하지 못했지만, flash-linear-attention 0.5.2의 배포 메타데이터가 `fla-core==0.5.2`를
+# 그대로 못박고 있어서 같은 값으로 고정한다.
 # einops는 --no-deps 대상이 아니므로 requirements/colab.txt에 있다.
 
-fla-core
-flash-linear-attention
+fla-core==0.5.2                 # 2026-09-21 A100 Colab에서 확인
+flash-linear-attention==0.5.2   # 2026-09-21 A100 Colab에서 확인
 
 # causal-conv1d는 선택 사항이다. wheel이 없어서 소스 빌드가 필요하고, Colab에서 빌드하면
 # 몇 분이 걸리는 데다 실패하기도 쉽다. 이 패키지가 없을 때 생기는 fallback은 Gated

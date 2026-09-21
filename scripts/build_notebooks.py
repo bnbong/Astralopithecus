@@ -89,7 +89,13 @@ PY = sys.executable
 
 
 def run(cmd, check=True, echo=True, quiet=False, hint=True):
-    """명령을 실행하면서 출력을 그대로 보여 주고 종료 코드와 소요 시간을 돌려줍니다."""
+    """명령을 실행하면서 출력을 그대로 보여 주고 종료 코드와 소요 시간을 돌려줍니다.
+
+    quiet가 True이면 명령의 출력도, 뒤에 붙는 "[rc=...]" 줄도 찍지 않습니다. 상태를 조회하는
+    호출은 실패가 정상적인 결과입니다. 예를 들어 `vqa.jobs status` 는 죽은 job에 대해 종료 코드
+    1을 돌려줍니다. 그 줄을 그대로 찍으면 셀 출력 맨 앞에 "[rc=1]"이 남아서, 실제 실패로 읽히는
+    오해를 부릅니다.
+    """
     if isinstance(cmd, str):
         cmd = shlex.split(cmd)
     cmd = [str(x) for x in cmd]
@@ -108,7 +114,8 @@ def run(cmd, check=True, echo=True, quiet=False, hint=True):
             print(line, end="", flush=True)
     rc = proc.wait()
     dt = time.time() - t0
-    print("[rc=%d] %.1f초" % (rc, dt), flush=True)
+    if not quiet:
+        print("[rc=%d] %.1f초" % (rc, dt), flush=True)
     if rc != 0:
         if hint:
             print("실패했습니다. 같은 명령에 --help 를 붙여서 인자 이름부터 확인하십시오.", flush=True)
@@ -2412,7 +2419,8 @@ def nb_21():
 7. (선택) 다른 프롬프트로 같은 fold 0을 추론해서 비교합니다.
 8. 원본 27B로 전체 test를 추론하고 제출 파일을 만듭니다.
 9. 학습을 시작합니다. 학습은 열 시간 안팎이 걸리므로 기다리지 않고 넘어갑니다.
-10. 학습이 끝난 뒤에 fold 0을 다시 추론하고, 원본과 문항 단위로 비교합니다.
+10. 학습이 끝난 뒤에 fold 0을 다시 추론하고, 원본과 문항 단위로 비교합니다. 전체 데이터로
+    학습했다면 이 단계는 건너뜁니다.
 11. 학습된 모델로 전체 test를 추론하고 제출 파일을 만듭니다.
 
 ## GPU 작업은 한 번에 하나만 돌립니다
@@ -2463,6 +2471,19 @@ out of memory가 났습니다. `vqa.jobs start` 는 job을 띄우자마자 곧�
 일 때에만 접미사가 붙지 않고 기존 이름을 그대로 씁니다. 프롬프트가 다른 결과가 같은 run 폴더에
 섞이는 일을 막기 위해서입니다. 학습과 추론에 쓰는 모든 명령이 같은 `PROMPT_ID` 를
 `--set prompt_id=...` 로 받으므로, 학습할 때와 추론할 때의 프롬프트는 항상 같습니다.
+
+`TRAIN_SCOPE` 는 학습에 쓰는 문항의 범위를 정합니다. 기본값인 `"fold0"` 은 fold 1~4의
+5,358문항만 학습하고 fold 0의 1,344문항을 검증으로 남겨 둡니다. 설정을 비교하고 학습 효과를
+판단하는 단계에서 쓰는 값입니다. `"full"` 로 바꾸면 fold 0까지 합친 6,702문항을 모두 학습하며,
+최종 제출 모델을 만들 때에만 씁니다. `"full"` 일 때에는 학습 run-id 뒤에 `_full` 이 붙어서
+기존 run과 섞이지 않고, 15번 절과 16번 절의 fold 0 평가는 안내만 출력하고 건너뜁니다. 전체
+데이터로 학습한 모델은 fold 0 문항도 학습에 썼으므로, 그 정확도가 일반화 성능을 나타내지 않기
+때문입니다. 17번 절의 test 추론과 제출 파일 생성은 두 경우 모두 그대로 동작합니다.
+
+`ALSO_BASE` 는 학습 모델로 추론할 때 원본 모델의 확률까지 같은 forward에서 계산할지를
+정합니다. 기본값은 `False` 입니다. 같은 프롬프트의 원본 예측 파일을 9번 절과 11번 절에서 이미
+만들어 두었다면, 같은 값을 다시 계산하는 셈이라 시간만 더 듭니다. 2026-09-21 실행에서 원본
+test 추론이 43분이었는데 학습 모델의 test 추론이 97분이 걸린 까닭이 이것입니다.
 """))
 
     cells.append(code(r'''
@@ -2496,7 +2517,12 @@ BASE_RUN_ID = "colab27b_base_bf16"
 FT_RUN_ID = "colab27b_ft_bf16"
 
 # --- 데이터 분할 ---
-SPLIT_FILE = "artifacts/data/split_fold0.json"     # 팀 공식 학습 분할 (train_fold1234, 5,358문항)
+# TRAIN_SCOPE 가 "fold0" 이면 fold 1~4만 학습하고 fold 0으로 검증합니다. 설정을 비교하는
+# 단계에서 쓰는 값이며 기본값입니다. "full" 로 바꾸면 fold 0까지 합친 6,702문항을 모두
+# 학습합니다. 최종 제출 모델을 만들 때에만 쓰십시오.
+TRAIN_SCOPE = "fold0"
+SPLIT_FILE_FOLD0 = "artifacts/data/split_fold0.json"  # 팀 공식 학습 분할 (train_fold1234, 5,358문항)
+SPLIT_FILE_FULL = "artifacts/data/split_full.json"    # fold 0까지 합친 전체 (6,702문항)
 VAL_IDS_FILE = "fold_csv_files/val_fold0.csv"      # 팀 공식 검증 분할 (fold 0, 1,344문항)
 VAL_OUT_BASE = "fold0_base"
 VAL_OUT_FT = "fold0_ft"
@@ -2514,7 +2540,11 @@ PREFLIGHT_INFER_ITEMS = 20
 
 # --- job 실행 ---
 AUTO_RESTART = 3                  # 비정상 종료 시 다시 띄울 횟수입니다. 1 이상이어야 합니다.
-ALSO_BASE = True                  # FT 추론과 같은 forward에서 base 확률도 함께 남깁니다.
+# ALSO_BASE 를 True로 두면 학습 모델 추론이 같은 forward에서 원본 확률도 함께 계산해
+# `*.base.csv` 로 남깁니다. 같은 프롬프트의 원본 예측이 이미 있으면 같은 값을 다시 계산하는
+# 셈이라 시간만 듭니다. 2026-09-21 test 추론이 원본 43분, 학습 모델 97분이었던 까닭이
+# 이것입니다. 결합 후보를 새로 계산해야 할 때에만 True로 바꾸십시오.
+ALSO_BASE = False
 JOB_POLL_SEC = 30                 # 기다리는 셀이 상태를 확인하는 간격입니다.
 MIN_FREE_GB = 0                   # GPU 여유 메모리 하한입니다. 0이면 정밀도에 맞춰 자동으로 정합니다.
 ''', parameters=True))
@@ -2582,9 +2612,15 @@ fallback이었습니다. 설치에 실패하더라도 학습 자체는 가능하
 
 run-id는 프롬프트와 정밀도가 다른 결과가 한 폴더에 섞이지 않도록 다음 규칙으로 만듭니다.
 
-- `PROMPT_ID` 가 `v1_image_only` 이면 접미사를 붙이지 않고 기본 이름을 그대로 씁니다.
+- `TRAIN_SCOPE` 가 `full` 이면 학습 run-id의 기본 이름 뒤에 먼저 `_full` 을 붙입니다.
+- `PROMPT_ID` 가 `v1_image_only` 이면 프롬프트 접미사를 붙이지 않고 기본 이름을 그대로 씁니다.
 - 그 밖의 프롬프트이면 `_<PROMPT_ID>` 를 붙입니다.
 - 정책이 bf16인데 VRAM이 모자라서 nf4로 내려가면 `_nf4` 를 덧붙이고 학습을 막습니다.
+
+예를 들어 `TRAIN_SCOPE` 가 `full` 이고 프롬프트가 기본값이며 bf16으로 돌아가면 학습 run-id는
+`colab27b_ft_bf16_full` 이 됩니다. 원본 모델의 run-id는 학습과 무관하므로 `_full` 이 붙지
+않습니다. 이 셀은 `TRAIN_SCOPE` 에 맞는 분할 파일이 실제로 있는지도 함께 확인합니다. 파일이
+없으면 `python scripts/folds_to_split.py` 를 먼저 실행하십시오.
 """))
 
     cells.append(code(r'''
@@ -2658,6 +2694,20 @@ CONFIG = RESOLVED_CONFIG
 if not Path(CONFIG).exists():
     raise RuntimeError("config 파일이 없습니다: %s" % CONFIG)
 
+# --- 학습 범위를 정합니다 ---
+# "full" 은 fold 0까지 학습에 넣으므로, 그 run의 fold 0 정확도는 학습 데이터를 다시 맞힌
+# 점수가 됩니다. 15번 절과 16번 절은 그 사실을 알리고 건너뜁니다.
+if TRAIN_SCOPE == "fold0":
+    SPLIT_FILE, SCOPE_SUFFIX = SPLIT_FILE_FOLD0, ""
+elif TRAIN_SCOPE == "full":
+    SPLIT_FILE, SCOPE_SUFFIX = SPLIT_FILE_FULL, "_full"
+else:
+    raise RuntimeError("TRAIN_SCOPE 는 fold0 또는 full 이어야 합니다: %r" % (TRAIN_SCOPE,))
+if not Path(SPLIT_FILE).exists():
+    raise RuntimeError(
+        "분할 파일이 없습니다: %s\n"
+        "`python scripts/folds_to_split.py` 를 먼저 실행하십시오." % SPLIT_FILE)
+
 # --- run-id를 확정합니다 ---
 PROMPT_SUFFIX = "" if PROMPT_ID == "v1_image_only" else "_" + PROMPT_ID
 
@@ -2669,7 +2719,9 @@ def resolve_run_id(stem, prompt_id=None):
 
 
 BASE_RUN = resolve_run_id(BASE_RUN_ID)
-FT_RUN = resolve_run_id(FT_RUN_ID)
+# 학습 범위 접미사는 기본 이름에 먼저 붙입니다. 그래야 전체 데이터로 학습한 결과가 fold 0으로
+# 학습한 기존 run 폴더에 섞이지 않습니다.
+FT_RUN = resolve_run_id(FT_RUN_ID + SCOPE_SUFFIX)
 CMP_RUN = resolve_run_id(BASE_RUN_ID, COMPARE_PROMPT_ID)
 
 if not MIN_FREE_GB:
@@ -2680,6 +2732,7 @@ print("GPU              : %s / VRAM %.1fGB" % (GPU_NAME, VRAM_GB))
 print("정밀도 정책      : %s -> %s" % (PRECISION_POLICY, PRECISION))
 print("적용 중인 config : %s" % CONFIG)
 print("프롬프트         : %s" % PROMPT_ID)
+print("학습 범위        : %s (%s)" % (TRAIN_SCOPE, SPLIT_FILE))
 print("base run-id      : %s" % BASE_RUN)
 print("ft run-id        : %s" % FT_RUN)
 print("비교용 run-id    : %s (선택 단계에서만 사용합니다)" % CMP_RUN)
@@ -2832,6 +2885,23 @@ def post_train_ready():
         print("학습된 adapter가 아직 없으므로 이 셀은 건너뜁니다: %s" % ADAPTER)
         print("13번 절에서 학습을 시작하고, 학습이 끝난 뒤에 이 셀을 다시 실행하십시오.")
         return False
+    return True
+
+
+def fold0_eval_skipped():
+    """fold 0 평가를 건너뛰어야 하면 이유를 출력하고 참을 돌려줍니다.
+
+    TRAIN_SCOPE 가 "full" 이면 fold 0의 1,344문항도 학습에 들어갑니다. 그 모델의 fold 0
+    정확도는 학습 데이터를 다시 맞힌 점수이므로 일반화 성능을 나타내지 않고, 원본과의
+    McNemar 비교도 같은 이유로 뜻을 잃습니다.
+    """
+    if TRAIN_SCOPE != "full":
+        return False
+    print("TRAIN_SCOPE 가 \"full\" 이므로 이 셀을 건너뜁니다.")
+    print("전체 데이터로 학습한 모델은 fold 0 문항도 학습에 썼습니다. 그래서 fold 0 정확도는")
+    print("학습 데이터를 다시 맞힌 점수이며, 일반화 성능도 학습 효과도 나타내지 못합니다.")
+    print("설정을 검증한 fold 0 비교는 TRAIN_SCOPE 가 \"fold0\" 이던 run에 이미 남아 있습니다.")
+    print("이 실행에서는 17번 절의 test 추론과 제출 파일 생성만 진행하십시오.")
     return True
 
 
@@ -3124,6 +3194,10 @@ make_submission(pred_file(BASE_RUN, TEST_OUT_BASE),
 `run_manifest.json` 에서 확인합니다. 정밀도가 다르면 학습을 시작하지 않고 멈춥니다. 같은
 run-id 아래에 bf16 checkpoint와 nf4 checkpoint가 섞이면 이어서 하는 실행을 믿을 수 없게 되기
 때문입니다.
+
+학습에 쓰는 분할은 파라미터 셀의 `TRAIN_SCOPE` 가 정합니다. `fold0` 이면 5,358문항을,
+`full` 이면 6,702문항을 학습하므로 전체 step 수도 그만큼 늘어납니다. 5번 절의 출력에서 학습
+범위와 분할 파일을 한 번 더 확인하신 다음에 이 셀을 실행하십시오.
 """))
 
     cells.append(code(r'''
@@ -3236,12 +3310,21 @@ else:
 돌려도 학습과 추론이 GPU를 함께 쓰는 일이 생기지 않습니다. 학습이 끝난 뒤에 이 아래의 셀들을
 차례로 다시 실행하시면 됩니다.
 
-`--also-base` 를 붙이면 같은 forward에서 원본 모델의 확률도 함께 남습니다. 결합 후보를 비교할
-때 GPU 추론을 한 번 더 하지 않고 CPU에서만 계산할 수 있게 됩니다.
+파라미터 셀의 `ALSO_BASE` 가 `True` 이면 predict 명령에 `--also-base` 가 붙어서, 같은
+forward에서 원본 모델의 확률도 함께 남습니다. 결합 후보를 비교할 때 GPU 추론을 한 번 더 하지
+않고 CPU에서만 계산할 수 있게 됩니다. 다만 기본값은 `False` 입니다. 같은 프롬프트의 원본 예측을
+9번 절에서 이미 만들어 두었다면 같은 값을 다시 계산하게 되므로, 추론 시간만 두 배 가까이
+늘어나기 때문입니다.
+
+`TRAIN_SCOPE` 가 `full` 이면 이 절의 두 셀은 안내만 출력하고 건너뜁니다. 전체 데이터로 학습한
+모델은 fold 0의 1,344문항도 학습에 썼으므로, 그 문항을 다시 맞힌 정확도로는 일반화 성능도 학습
+효과도 판단할 수 없습니다.
 """))
 
     cells.append(code(r'''
-if post_train_ready():
+if fold0_eval_skipped():
+    pass
+elif post_train_ready():
     cmd = [PY, "-m", "vqa.predict",
            "--config", CONFIG, "--run-id", FT_RUN,
            "--csv", "train.csv", "--ids-file", VAL_IDS_FILE,
@@ -3250,7 +3333,9 @@ if post_train_ready():
 '''))
 
     cells.append(code(r'''
-if not pred_done(FT_RUN, VAL_OUT_FT):
+if fold0_eval_skipped():
+    pass
+elif not pred_done(FT_RUN, VAL_OUT_FT):
     print("학습된 모델의 fold 0 예측이 아직 끝나지 않아 평가를 건너뜁니다.")
     print("바로 위 셀이 끝난 다음에 이 셀을 다시 실행하십시오.")
 else:
@@ -3269,10 +3354,16 @@ else:
 0.05보다 크면 두 모델의 차이를 표본 변동과 구분할 수 없다는 뜻이므로, 정확도가 조금 올랐더라도
 학습이 도움이 되었다고 팀 채널에 보고하지 마십시오. 어떤 문항이 달라졌는지는
 `artifacts/eval/base_vs_ft_changed.csv` 에 저장됩니다.
+
+이 비교는 `TRAIN_SCOPE` 가 `fold0` 일 때에만 뜻이 있습니다. `full` 이면 학습 모델이 fold 0을
+이미 학습에 썼으므로 짝지은 비교가 성립하지 않고, 아래 셀은 안내만 출력하고 건너뜁니다. 학습
+설정이 도움이 되는지에 대한 판단은 `fold0` 으로 돌린 run에서 이미 끝났다고 보시면 됩니다.
 """))
 
     cells.append(code(r'''
-if not (pred_done(BASE_RUN, VAL_OUT_BASE) and pred_done(FT_RUN, VAL_OUT_FT)):
+if fold0_eval_skipped():
+    pass
+elif not (pred_done(BASE_RUN, VAL_OUT_BASE) and pred_done(FT_RUN, VAL_OUT_FT)):
     print("비교에 필요한 예측 두 개가 아직 모두 끝나지 않아 이 셀은 건너뜁니다.")
     print("  원본 모델 fold 0 : %s" % ("완료" if pred_done(BASE_RUN, VAL_OUT_BASE) else "미완료"))
     print("  학습 모델 fold 0 : %s" % ("완료" if pred_done(FT_RUN, VAL_OUT_FT) else "미완료"))

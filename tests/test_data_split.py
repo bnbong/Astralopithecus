@@ -431,7 +431,9 @@ def write_fold_files(root: Path, val_ids: list[str], train_ids: list[str]) -> Pa
     return fold_dir
 
 
-def run_folds_to_split(fold_dir: Path, data_root: Path, out_dir: Path) -> int:
+def run_folds_to_split(
+    fold_dir: Path, data_root: Path, out_dir: Path, scope: str | None = None
+) -> int:
     import sys as _sys
 
     from scripts import folds_to_split as folds_cli
@@ -446,6 +448,8 @@ def run_folds_to_split(fold_dir: Path, data_root: Path, out_dir: Path) -> int:
         "--out-dir",
         str(out_dir),
     ]
+    if scope is not None:
+        _sys.argv += ["--scope", scope]
     try:
         return folds_cli.main()
     finally:
@@ -497,3 +501,77 @@ def test_folds_to_split_output_is_committed_and_current() -> None:
     assert payload["n_val"] == 1344
     assert payload["n_train"] == 5358
     assert not set(payload["train_ids"]) & set(payload["val_ids"])
+
+
+def test_folds_to_split_writes_full_split_with_empty_validation(tmp_path: Path) -> None:
+    """--scope full은 fold 0까지 합친 학습 목록과 빈 검증 목록을 쓴다."""
+    import json
+
+    val_ids = ["train_0002.jpg", "train_0004.jpg"]
+    train_ids = ["train_0001.jpg", "train_0003.jpg", "train_0005.jpg"]
+    fold_dir = write_fold_files(tmp_path, val_ids, train_ids)
+    out_dir = tmp_path / "out"
+
+    assert run_folds_to_split(fold_dir, tmp_path, out_dir, scope="full") == 0
+
+    payload = json.loads((out_dir / "split_full.json").read_text(encoding="utf-8"))
+    assert payload["version"] == "full"
+    assert payload["train_ids"] == sorted(train_ids + val_ids)
+    assert payload["val_ids"] == []
+    assert payload["n_train"] == 5 and payload["n_val"] == 0
+    assert payload["includes_fold0_val"] is True
+    assert payload["n_fold0_val_added"] == len(val_ids)
+    assert payload["content_sha256"] == content_hash(
+        {k: v for k, v in payload.items() if k not in {"created", "content_sha256"}}
+    )
+    # fold0 전용으로 돌렸으면 전체 분할 파일은 생기지 않는다.
+    assert not (out_dir / "split_fold0.json").exists()
+
+
+def test_train_accepts_a_split_with_no_validation_ids(tmp_path: Path) -> None:
+    """vqa.train의 split 로더는 train_ids만 읽으므로 빈 val_ids를 그대로 받아들인다."""
+    import json
+
+    from vqa.train import load_split_ids
+
+    split_path = tmp_path / "split_full.json"
+    split_path.write_text(
+        json.dumps({"train_ids": ["train_0001.jpg", "train_0002.jpg"], "val_ids": []}),
+        encoding="utf-8",
+    )
+    ids, split_hash = load_split_ids(str(split_path), [])
+    assert ids == ["train_0001.jpg", "train_0002.jpg"]
+    assert split_hash
+
+
+def test_full_split_output_is_committed_and_current() -> None:
+    """저장소의 split_full.json이 fold0 분할과 정확히 맞물리는지 확인한다."""
+    import json
+
+    repo = Path(__file__).resolve().parents[1]
+    full_path = repo / "artifacts" / "data" / "split_full.json"
+    fold0_path = repo / "artifacts" / "data" / "split_fold0.json"
+    if not (full_path.exists() and fold0_path.exists()):
+        pytest.skip("artifacts/data의 split 파일이 아직 없습니다.")
+
+    full = json.loads(full_path.read_text(encoding="utf-8"))
+    fold0 = json.loads(fold0_path.read_text(encoding="utf-8"))
+
+    assert full["n_train"] == 6702
+    assert full["n_val"] == 0
+    assert full["val_ids"] == []
+    assert len(full["train_ids"]) == 6702
+    assert len(set(full["train_ids"])) == 6702
+
+    full_ids = set(full["train_ids"])
+    fold0_train = set(fold0["train_ids"])
+    fold0_val = set(fold0["val_ids"])
+    # fold0의 학습 목록은 전체의 부분집합이고, 나머지가 정확히 fold 0의 1,344문항이다.
+    assert fold0_train <= full_ids
+    assert full_ids - fold0_train == fold0_val
+    assert len(fold0_val) == 1344
+    # 두 파일이 같은 fold CSV에서 나왔는지 확인한다.
+    assert full["source_files"] == fold0["source_files"]
+    assert full["content_sha256"] == content_hash(
+        {k: v for k, v in full.items() if k not in {"created", "content_sha256"}}
+    )

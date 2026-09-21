@@ -218,6 +218,13 @@ python scripts/folds_to_split.py
 `ea2c8572129342f138c551e6e32a3427902c730db349c45d0e5342f03dfccae0` 입니다. 검증 500문항을 쓰던
 `artifacts/data/split_v1.json` 은 폐기했습니다.
 
+같은 명령이 `artifacts/data/split_full.json` 도 함께 만듭니다. 이 파일은 fold 0의 1,344문항까지
+학습에 넣은 6,702문항짜리 분할이며, 내용 해시는
+`d394c8369c8dff020eea12e5d2d6cc00a7b4eaf97d1cb6f411d2e04a8ac4db01` 입니다. 검증 목록이 비어
+있으므로 이 분할로 학습한 모델은 fold 0 정확도로 평가할 수 없습니다. fold 0에서 설정을 이미
+검증한 다음에 최종 제출 모델을 만들 때에만 쓰십시오. 21번 노트북에서는 파라미터 셀의
+`TRAIN_SCOPE` 를 `"full"` 로 바꾸면 이 분할을 쓰고, 학습 run-id 뒤에 `_full` 이 붙습니다.
+
 MD5 그룹만으로 묶었기 때문에 픽셀이 조금 다른 근접 중복은 잡히지 않았습니다. fold 0과 학습
 분할에 걸쳐 있는 쌍이 하나 남아 있으며 `train_0395.jpg` 와 `train_4458.jpg` 입니다. perceptual
 hash로만 일치하고 문항 수로 보면 무시할 만한 수준이라서 그대로 둡니다.
