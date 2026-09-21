@@ -1,0 +1,37 @@
+# Colab Pro+ A100 40GB / transformers 5.x / Qwen3.5-27B NF4 QLoRA.
+# 40GB에서는 bf16이 들어가지 않는다. visual token도 768로 낮춰 시작한다.
+model_id: Qwen/Qwen3.5-27B
+revision: null
+model_path: null          # 오프라인이면 로컬 스냅샷 디렉터리를 여기에 적는다
+precision: nf4
+attn_implementation: sdpa
+
+min_pixels: 262144        # 256 * 32 * 32
+max_pixels: 786432        # 768 * 32 * 32
+
+prompt_id: v1_image_only
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  targets: auto
+
+train:
+  lr: 1.0e-4
+  epochs: 1
+  micro_batch: 1
+  grad_accum: 8
+  warmup_ratio: 0.03
+  scheduler: linear
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  seed: 42
+  shuffle_options: true
+  save_every_steps: 50
+  save_every_minutes: 15
+  keep_last: 2
+
+infer:
+  batch_size: 1
+  save_every_items: 50

@@ -1,0 +1,38 @@
+# 실습실 RTX 5060 Ti 16GB / transformers 5.x / Qwen3.5-4B.
+# Qwen3.5는 patch 16, merge 2라서 merged visual token 하나가 32x32 픽셀에 대응한다.
+# 4B는 16GB에서 bf16 LoRA가 들어갈 가능성이 있다. OOM이면 --set precision=nf4로 내린다.
+model_id: Qwen/Qwen3.5-4B
+revision: null
+model_path: null          # 오프라인이면 로컬 스냅샷 디렉터리를 여기에 적는다
+precision: bf16
+attn_implementation: sdpa
+
+min_pixels: 262144        # 256 * 32 * 32
+max_pixels: 786432        # 768 * 32 * 32
+
+prompt_id: v1_image_only
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  targets: auto
+
+train:
+  lr: 1.0e-4
+  epochs: 1
+  micro_batch: 1
+  grad_accum: 8
+  warmup_ratio: 0.03
+  scheduler: linear
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  seed: 42
+  shuffle_options: true
+  save_every_steps: 50
+  save_every_minutes: 15
+  keep_last: 2
+
+infer:
+  batch_size: 2
+  save_every_items: 50

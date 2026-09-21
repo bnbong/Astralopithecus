@@ -1,0 +1,37 @@
+# Colab Pro+ A100 80GB / transformers 5.x / Qwen3.5-27B bf16 LoRA.
+# 참고 실행(다른 팀, A100-80GB, 1024 visual token): peak 57GB, 3.37 s/microstep, 5k 표본 1 epoch에 4h38m.
+model_id: Qwen/Qwen3.5-27B
+revision: null
+model_path: null          # 오프라인이면 로컬 스냅샷 디렉터리를 여기에 적는다
+precision: bf16
+attn_implementation: sdpa
+
+min_pixels: 262144        # 256 * 32 * 32
+max_pixels: 1048576        # 1024 * 32 * 32
+
+prompt_id: v1_image_only
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  targets: auto
+
+train:
+  lr: 1.0e-4
+  epochs: 1
+  micro_batch: 1
+  grad_accum: 8
+  warmup_ratio: 0.03
+  scheduler: linear
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  seed: 42
+  shuffle_options: true
+  save_every_steps: 50
+  save_every_minutes: 15
+  keep_last: 2
+
+infer:
+  batch_size: 1
+  save_every_items: 50

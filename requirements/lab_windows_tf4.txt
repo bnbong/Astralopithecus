@@ -1,0 +1,35 @@
+# 실습실 Windows / RTX 5060 Ti (Blackwell sm120) / transformers 4.x
+# Qwen2.5-VL-3B-Instruct baseline 경로. 가장 빨리 한 바퀴를 도는 환경이다.
+#
+# torch는 CUDA 12.8 빌드를 인덱스에서 받는다. 인터넷이 없으면 미리 받아 둔 wheel 디렉터리를 쓴다.
+#   pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.11.0
+#   pip install --no-index --find-links D:\wheels -r requirements/lab_windows_tf4.txt
+#
+# 아래 TODO 표시가 붙은 줄은 여기서 정확한 버전을 확인할 수 없는 항목이다.
+# 첫 preflight가 PASS한 직후 `pip freeze`로 실제 값을 받아 고정한다. 추측으로 채우지 않는다.
+
+torch==2.11.0                 # +cu128 빌드. 계약의 실습실 사실에서 확인됨
+torchvision==0.26.0           # torch 2.11.0+cu128과 짝. transformers의 이미지 처리 경로가 쓴다
+# torchvision도 같은 인덱스에서 받는다:
+#   pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.11.0 torchvision==0.26.0
+
+# Qwen2.5-VL은 transformers 4.49 이상에서 지원된다. 5.x로 올라가면 이 파일의 전제가 깨진다.
+transformers>=4.49,<5         # TODO: preflight PASS 후 정확한 4.x 버전으로 고정
+
+peft==0.20.0                  # 계약의 참고 실행에서 확인된 버전
+accelerate>=1.8.0             # TODO: pip freeze로 정확한 버전 고정
+bitsandbytes>=0.46.1          # TODO: Windows sm120에서 실제로 동작한 버전으로 고정
+safetensors                   # TODO: pip freeze로 고정
+sentencepiece                 # TODO: pip freeze로 고정
+
+pandas==2.2.3                 # 계약의 참고 실행에서 확인된 버전
+numpy                         # TODO: torch/pandas와 맞는 버전으로 고정 (2.x 호환 여부 확인)
+pillow                        # TODO: pip freeze로 고정
+pyyaml                        # TODO: pip freeze로 고정
+tqdm                          # TODO: pip freeze로 고정
+
+pytest                        # 테스트 실행용. 학습 자체에는 필요 없다
+
+# --- 데이터 감사 / 노트북 생성 ---
+ImageHash                     # scripts/audit_data.py의 phash 근접 중복 탐지. 없으면 audit이 실패한다
+nbformat                      # scripts/build_notebooks.py가 .ipynb를 생성할 때만 필요하다

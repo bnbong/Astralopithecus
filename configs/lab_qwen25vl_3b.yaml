@@ -1,0 +1,37 @@
+# 실습실 RTX 5060 Ti 16GB / transformers 4.x / 가장 빠른 baseline 경로.
+# Qwen2.5-VL은 patch 14, merge 2라서 merged visual token 하나가 28x28 픽셀에 대응한다.
+model_id: Qwen/Qwen2.5-VL-3B-Instruct
+revision: null
+model_path: null          # 오프라인이면 로컬 스냅샷 디렉터리를 여기에 적는다
+precision: nf4            # 16GB에서 여유를 두기 위한 기본값. bf16도 들어간다면 --set precision=bf16
+attn_implementation: sdpa
+
+min_pixels: 200704        # 256 * 28 * 28
+max_pixels: 602112        # 768 * 28 * 28
+
+prompt_id: v1_image_only
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  targets: auto
+
+train:
+  lr: 1.0e-4
+  epochs: 1
+  micro_batch: 1
+  grad_accum: 8
+  warmup_ratio: 0.03
+  scheduler: linear
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  seed: 42
+  shuffle_options: true
+  save_every_steps: 50
+  save_every_minutes: 15
+  keep_last: 2
+
+infer:
+  batch_size: 2
+  save_every_items: 50
