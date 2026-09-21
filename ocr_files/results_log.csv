@@ -1,0 +1,7 @@
+﻿time,model,prompt,split,n,acc,pred_file
+2026-09-21 16:01,qwen3b,p1,fold0,1344,0.8824,preds_qwen3b_p1_fold0.csv
+2026-09-21 16:14,qwen3b,p2,fold0,1344,0.9144,preds_qwen3b_p2_fold0.csv
+2026-09-21 16:27,qwen3b,p3,fold0,1344,0.91,preds_qwen3b_p3_fold0.csv
+2026-09-21 16:31,qwen3b,p2,fold0_npn,300,0.91,preds_qwen3b_p2_fold0.csv
+2026-09-21 16:37,qwen3b,p4,fold0_npn,300,0.8967,preds_qwen3b_p4_fold0_npn.csv
+2026-09-21 17:01,qwen3b,p4,fold0_full,1344,0.9122,preds_qwen3b_p4_fold0_full.csv
