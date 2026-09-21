@@ -336,8 +336,22 @@ ENV_SETUP = r'''
 # Colab은 노트북마다 가상 머신을 따로 배정합니다. 20번에서 설치를 끝냈더라도 21번 가상 머신에는
 # 아무것도 깔려 있지 않으므로, 새 가상 머신을 받을 때마다 이 셀을 처음부터 다시 실행해야 합니다.
 REQ = "requirements/colab.txt"
-if not Path(REQ).exists():
-    raise RuntimeError(REQ + " 이 없습니다. 코드 가져오기 셀이 제대로 끝났는지 먼저 확인하십시오.")
+REQ_NODEPS = "requirements/colab-nodeps.txt"
+for _req in (REQ, REQ_NODEPS):
+    if not Path(_req).exists():
+        raise RuntimeError(_req + " 이 없습니다. 코드 가져오기 셀이 제대로 끝났는지 먼저 확인하십시오.")
+
+_TORCH_VERSION_SRC = "import torch; print(torch.__version__)"
+
+
+def _torch_version():
+    """지금 이 런타임에 실제로 설치되어 있는 torch 버전을 별도 프로세스에서 읽습니다."""
+    res = run([PY, "-c", _TORCH_VERSION_SRC], check=False, quiet=True, echo=False, hint=False)
+    return res["output"].strip().splitlines()[-1].strip() if res["rc"] == 0 else None
+
+
+TORCH_BEFORE = _torch_version()
+print("설치 전 torch :", TORCH_BEFORE or "(확인하지 못했습니다)")
 
 # Colab 기본 이미지에는 torchao 0.10.0이 들어 있습니다. PEFT가 비양자화 Linear에 LoRA를 붙일 때
 # 이 버전과 충돌해서 실패하므로 bf16 경로에서는 반드시 먼저 지웁니다. 설치되어 있지 않으면
@@ -349,6 +363,26 @@ if _install["rc"] != 0:
     raise RuntimeError(
         "requirements/colab.txt 설치가 실패했습니다. 위 출력에서 어느 패키지가 막혔는지 확인한 다음 "
         "이 셀을 다시 실행하십시오."
+    )
+
+# fla 계열은 자기 의존성으로 torch와 triton을 다시 끌어옵니다. 그대로 두면 이미 통과해 둔
+# torch 빌드가 바뀌므로 반드시 --no-deps로 설치합니다. 이 단계가 실패하더라도 학습 자체는
+# 가능하므로 셀을 멈추지 않고, 아래에서 경고만 크게 출력합니다.
+FLA_OK = True
+FLA_REASON = ""
+_install_nodeps = run([PY, "-m", "pip", "install", "-q", "--no-deps", "-r", REQ_NODEPS], check=False)
+if _install_nodeps["rc"] != 0:
+    FLA_OK = False
+    FLA_REASON = "requirements/colab-nodeps.txt 설치가 실패했습니다."
+
+TORCH_AFTER = _torch_version()
+print("설치 후 torch :", TORCH_AFTER or "(확인하지 못했습니다)")
+if TORCH_BEFORE and TORCH_AFTER and TORCH_BEFORE != TORCH_AFTER:
+    raise RuntimeError(
+        "설치 과정에서 torch 버전이 %s 에서 %s 로 바뀌었습니다. --no-deps 설치가 의도대로 "
+        "동작하지 않은 것입니다. requirements/colab-nodeps.txt 에 --no-deps 없이 설치하면 안 되는 "
+        "패키지만 들어 있는지 확인하고, 런타임을 재시작한 다음 이 셀부터 다시 실행하십시오."
+        % (TORCH_BEFORE, TORCH_AFTER)
     )
 
 # 점검은 반드시 별도 프로세스에서 수행합니다. 지금 커널은 예전 버전을 이미 import 해 두었을 수
@@ -388,6 +422,82 @@ if _verify["rc"] != 0:
         "실행하십시오. torchao가 남아 있다는 메시지가 보이면 런타임을 재시작하고 이 셀부터 다시 "
         "실행하면 됩니다."
     )
+
+# --- 가속 커널(fla) 확인 ---
+# transformers의 Qwen3.5 Gated DeltaNet은 fla가 있으면 그 커널을 쓰고, 없으면 PyTorch 참조
+# 구현으로 내려갑니다. 2026-09-21 Colab A100에서 bf16 학습이 microbatch당 7.3초로 참고 실행의
+# 3.37초보다 두 배 이상 느렸던 원인이 이 fallback이었습니다. 여기에서는 import가 되는지와,
+# 작은 텐서 하나로 forward와 backward가 유한한 값을 내는지까지 확인합니다.
+_FLA_CHECK_SRC = """
+import torch
+import torch.nn.functional as F
+from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+
+try:
+    import fla
+    print('fla                  :', getattr(fla, '__version__', '(버전 정보 없음)'))
+except Exception:
+    pass
+print('chunk_gated_delta_rule import 성공')
+
+if not torch.cuda.is_available():
+    raise AssertionError('CUDA가 없어 fla 커널을 시험할 수 없습니다.')
+
+B, T, H, D = 1, 1024, 8, 128
+dev = 'cuda'
+torch.manual_seed(0)
+q = torch.randn(B, T, H, D, device=dev, dtype=torch.bfloat16, requires_grad=True)
+k = torch.randn(B, T, H, D, device=dev, dtype=torch.bfloat16, requires_grad=True)
+v = torch.randn(B, T, H, D, device=dev, dtype=torch.bfloat16, requires_grad=True)
+# g는 float32 음수 decay, beta는 0과 1 사이의 값입니다. 모델이 넘기는 형태와 같게 맞춥니다.
+g = -F.softplus(torch.randn(B, T, H, device=dev, dtype=torch.float32))
+beta = torch.rand(B, T, H, device=dev, dtype=torch.bfloat16)
+
+# delta rule은 k의 노름이 1보다 크면 상태가 발산해 T=1024에서 inf/nan이 나옵니다. 실제 모델도
+# q, k를 L2 정규화해서 넘기므로 여기서도 정규화한 값을 넘깁니다. 정규화하지 않으면 fla가
+# 정상인데도 이 확인이 실패해 거짓 경고가 뜹니다. q, k는 leaf로 두어 grad 확인은 그대로 됩니다.
+qn = F.normalize(q, p=2, dim=-1)
+kn = F.normalize(k, p=2, dim=-1)
+
+try:
+    out = chunk_gated_delta_rule(qn, kn, v, g=g, beta=beta)
+except TypeError:
+    # 버전에 따라 g와 beta를 위치 인자로만 받습니다.
+    out = chunk_gated_delta_rule(qn, kn, v, g, beta)
+o = out[0] if isinstance(out, (tuple, list)) else out
+assert torch.isfinite(o.float()).all(), 'forward 결과에 유한하지 않은 값이 있습니다.'
+o.float().pow(2).mean().backward()
+for name, tensor in (('q', q), ('k', k), ('v', v)):
+    assert tensor.grad is not None, name + ' 의 grad가 없습니다.'
+    assert torch.isfinite(tensor.grad.float()).all(), name + ' 의 grad에 유한하지 않은 값이 있습니다.'
+print('fla 커널 forward/backward 정상 (B=%d T=%d H=%d D=%d, bf16)' % (B, T, H, D))
+"""
+
+if FLA_OK:
+    _fla = run([PY, "-c", _FLA_CHECK_SRC], check=False, echo=False)
+    if _fla["rc"] != 0:
+        FLA_OK = False
+        FLA_REASON = "fla 커널 확인이 실패했습니다. 바로 위 출력에 원인이 있습니다."
+
+if FLA_OK:
+    print()
+    print("가속 커널(fla)을 쓸 수 있습니다. Gated DeltaNet이 참조 구현으로 내려가지 않습니다.")
+else:
+    print()
+    print("!" * 78)
+    print("경고: 가속 커널(fla)을 쓸 수 없습니다.")
+    print("사유: %s" % (FLA_REASON or "원인을 특정하지 못했습니다."))
+    print("")
+    print("이 상태로도 학습과 추론은 동작합니다. 다만 Qwen3.5의 Gated DeltaNet이 PyTorch 참조")
+    print("구현으로 내려가기 때문에 학습이 약 2배 느려집니다. 10시간이 걸릴 학습이라면 20시간이")
+    print("되므로, 일정을 그대로 두고 진행할 수 있는지 먼저 판단하십시오.")
+    print("")
+    print("다시 시도하려면 아래 두 줄을 차례로 실행한 다음 이 셀을 다시 실행하십시오.")
+    print("  !pip install -q --no-deps fla-core flash-linear-attention")
+    print("  !pip install -q einops")
+    print("")
+    print("preflight의 kernel_fast_path 검사가 같은 내용을 WARN으로 다시 알려 줍니다.")
+    print("!" * 78)
 '''
 
 
@@ -2285,49 +2395,80 @@ def nb_21():
 # 21. Colab 27B 본 실행
 
 담당: 준혁
-목표: 오래 걸리는 작업을 전부 분리된 job으로 띄워서, 셀을 멈추거나 브라우저를 닫아도 계속
-돌아가게 만드는 것입니다.
 
-## Colab에서 실제로 보장되는 범위
+이 노트북은 위에서 아래로 한 번만 읽고 실행하도록 만들었습니다. 맨 위의 파라미터 셀에서
+모든 선택을 끝내고, 그 아래의 셀들은 순서대로 실행하기만 하면 됩니다. 오래 걸리는 작업은
+모두 `python -m vqa.jobs` 로 분리해서 띄우므로, 셀을 멈추거나 브라우저를 닫아도 계속
+돌아갑니다.
 
-정확히 알고 있어야 사고를 막을 수 있으므로, 사실 관계를 먼저 정리합니다.
+## 이 노트북이 수행하는 순서
 
-분리된 프로세스가 살아남는 경우는 다음과 같습니다.
-- 노트북 셀을 중단했을 때
-- 브라우저 탭을 닫았을 때
-- 노트북 화면과 런타임 사이의 연결이 일시적으로 끊겼을 때
+1. 파라미터를 정하고 Drive를 연결한 다음 코드를 받습니다.
+2. 환경을 설치하고 확인합니다. 가속 커널을 쓸 수 있는지도 여기에서 봅니다.
+3. 현재 GPU의 VRAM을 재서 정밀도와 run-id를 확정합니다.
+4. 데이터를 로컬 디스크에 풉니다.
+5. preflight로 학습 전 점검을 수행합니다.
+6. 학습하지 않은 원본 27B로 fold 0을 추론하고 평가합니다.
+7. (선택) 다른 프롬프트로 같은 fold 0을 추론해서 비교합니다.
+8. 원본 27B로 전체 test를 추론하고 제출 파일을 만듭니다.
+9. 학습을 시작합니다. 학습은 열 시간 안팎이 걸리므로 기다리지 않고 넘어갑니다.
+10. 학습이 끝난 뒤에 fold 0을 다시 추론하고, 원본과 문항 단위로 비교합니다.
+11. 학습된 모델로 전체 test를 추론하고 제출 파일을 만듭니다.
 
-분리된 프로세스도 함께 죽는 경우는 다음과 같습니다.
-- 유휴 시간 초과로 런타임이 회수될 때
-- 최대 연속 실행 시간에 도달했을 때
-- compute unit이 소진되었을 때
-- 자원 사정으로 인스턴스가 선점될 때
-- 사용자가 런타임을 직접 종료하거나 다시 시작할 때
+## GPU 작업은 한 번에 하나만 돌립니다
 
-Pro+ 구독은 백그라운드 실행을 제공한다고 안내되어 있습니다. 다만 실제 계정과 실제 런타임에서
-어떻게 동작하는지는 D1에 직접 확인해야 합니다. 아래 0번 절에 확인 절차를 적어 두었습니다.
+2026-09-21에 GPU 셀 네 개를 연달아 실행해서 모델 네 개가 동시에 올라갔고, 그 결과로
+out of memory가 났습니다. `vqa.jobs start` 는 job을 띄우자마자 곧바로 돌아오기 때문입니다.
+그래서 이 노트북의 GPU 단계는 job을 띄운 다음 `vqa.jobs wait` 로 끝날 때까지 기다립니다.
+`vqa.jobs start` 자체도 같은 run-root에 살아 있는 job이 있으면 시작을 거부합니다. 메뉴의
+"모두 실행"을 눌러도 작업이 겹치지 않습니다.
 
-세션을 유지하겠다고 자동 클릭 스크립트 같은 방법을 쓰지 않습니다. Colab 이용 약관에 어긋나고,
-계정이 제한되면 팀 전체의 GPU 경로가 사라집니다. 대신 checkpoint를 Drive에 남겨서 언제 끊기더라도
-이어서 실행할 수 있게 만드는 방식으로 대응합니다.
+예외는 학습 하나뿐입니다. 학습은 열 시간 안팎이 걸려서 셀이 그만큼 붙잡혀 있으면 곤란하므로,
+시작만 하고 기다리지 않습니다. 대신 학습 다음에 오는 15번 절부터 17번 절까지의 셀은 실행하기
+전에 학습 job이 아직 살아 있는지와 `final_adapter` 가 만들어졌는지를 스스로 확인하고, 아직
+때가 아니면 안내만 출력하고 아무 일도 하지 않습니다. 그러므로 학습을 띄운 직후에 "모두 실행"이
+계속 내려가더라도 GPU를 함께 쓰는 일은 생기지 않습니다. 학습이 끝난 다음에 그 셀들을 차례로
+다시 실행하시면 됩니다.
+
+## 이미 끝난 작업은 건너뜁니다
+
+`vqa.predict` 는 예측 파일에 이미 들어 있는 문항을 건너뛰고 남은 문항만 추론합니다. 예측이
+완전히 끝나면 파일 옆에 `.manifest.json` 이 생기고, 이 노트북의 도우미 함수는 그 파일이
+있으면 모델을 다시 올리지 않고 해당 단계를 건너뜁니다. `vqa.train` 은 `--resume auto` 가
+기본이므로 Drive에 남은 마지막 checkpoint에서 이어집니다. 그래서 어느 셀이든 다시 실행해도
+안전합니다.
 """))
 
     cells.append(md("""
-## 0. 재접속 절차 (연결이 끊겼다면 여기부터)
+## 세션이 끊긴 뒤에 다시 시작하는 방법
 
-브라우저를 닫았다가 돌아왔거나 연결이 끊겼다면 아래 순서대로 진행하십시오.
+가상 머신은 언제든 회수될 수 있습니다. 다시 접속했다면 아래 세 가지만 다시 실행하면 됩니다.
 
-1. 파라미터 셀과 Drive 연결 셀, 코드 가져오기 셀, 부트스트랩 셀을 실행합니다.
-2. 0-1절의 환경 설치와 확인 셀을 실행합니다. 가상 머신이 바뀌었다면 패키지가 하나도 없습니다.
-3. `jobs status` 셀을 실행해서 프로세스가 살아 있는지 확인합니다.
-4. 살아 있으면 감시 셀만 실행하고 기다립니다. 추가로 할 일은 없습니다.
-5. 프로세스가 없고 `/content` 의 데이터도 사라졌다면 가상 머신이 회수된 것입니다. 데이터 준비
-   셀을 다시 실행한 다음, **원래 실행했던 시작 셀을 그대로 다시 실행합니다.** 명령을 고칠 필요는
-   없습니다. Drive에 남은 checkpoint에서 이어집니다.
+1. 파라미터 셀
+2. Drive 연결 셀과 코드 가져오기 셀, 부트스트랩 셀
+3. 환경 설치와 확인 셀, GPU와 정밀도 결정 셀, 데이터 준비 셀
+4. 실행 도우미 셀 (7번 절)
+
+여기까지 실행한 다음에는 중단된 지점의 셀을 그대로 다시 실행하십시오. 명령을 고칠 필요가
+없습니다. 예측은 남은 문항부터, 학습은 마지막 checkpoint부터 이어집니다. 상황별 대응은
+`docs/colab_survival.md` 에 더 자세히 적어 두었습니다.
+"""))
+
+    cells.append(md("""
+## 1. 파라미터
+
+이 셀이 이 노트북의 유일한 선택 지점입니다. 아래에서 다시 묻거나 다시 정하는 곳은 없습니다.
+
+`PROMPT_ID` 를 바꾸면 run-id에 프롬프트 이름이 접미사로 붙습니다. 기본값인 `v1_image_only`
+일 때에만 접미사가 붙지 않고 기존 이름을 그대로 씁니다. 프롬프트가 다른 결과가 같은 run 폴더에
+섞이는 일을 막기 위해서입니다. 학습과 추론에 쓰는 모든 명령이 같은 `PROMPT_ID` 를
+`--set prompt_id=...` 로 받으므로, 학습할 때와 추론할 때의 프롬프트는 항상 같습니다.
 """))
 
     cells.append(code(r'''
-# ===== 파라미터 =====
+# ===== 파라미터 (이 노트북의 모든 선택을 여기에서 끝냅니다) =====
+
+# --- 경로 ---
 PROJECT_ROOT = "/content/ssafy-16-2-ai"
 REPO_URL = "https://github.com/bnbong/Astralopithecus.git"   # 비공개 저장소입니다.
 REPO_BRANCH = "main"
@@ -2335,30 +2476,55 @@ CODE_ZIP = ""                                     # 토큰을 쓸 수 없을 때
 DRIVE_MOUNT = "/content/drive"
 DRIVE_DIR = "/content/drive/MyDrive/vqa"
 ARCHIVE_PATH = "/content/drive/MyDrive/ssafy-16-2-ai.zip"
-ARCHIVE_PASSWORD = ""
-
+ARCHIVE_PASSWORD = ""                             # 비워 두면 실행할 때 입력받습니다. 암호가 없으면 "none"
 LOCAL_SCRATCH = "/content/scratch"
 DATA_ROOT = "/content/data"
 RUN_ROOT = "/content/drive/MyDrive/vqa/runs"
-MODEL_ROOT = "/content/drive/MyDrive/vqa/hf_cache"   # model_snapshot.json이 있으면 덮어씁니다.
+MODEL_ROOT = "/content/drive/MyDrive/vqa/hf_cache"   # 20번이 남긴 model_snapshot.json이 있으면 그것을 씁니다.
 
+# --- 모델과 프롬프트 ---
 # 정밀도 정책입니다. 팀 결정은 bf16입니다. "auto"는 VRAM만 보고 고르고, "nf4"는 항상 nf4를 씁니다.
 PRECISION_POLICY = "bf16"
-CONFIG = "configs/colab_qwen35_27b_bf16.yaml"   # 아래 셀이 현재 GPU와 정책을 보고 다시 정합니다.
+BF16_CONFIG = "configs/colab_qwen35_27b_bf16.yaml"
+NF4_CONFIG = "configs/colab_qwen35_27b_nf4.yaml"
+CONFIG = ""                       # 비워 두면 아래 셀이 정책과 VRAM을 보고 정합니다. 직접 적으면 그 값을 씁니다.
+PROMPT_ID = "v1_image_only"       # 학습과 추론이 모두 이 프롬프트를 씁니다.
+
+# --- run-id의 기본 이름 ---
+# 실제 run-id는 여기에 프롬프트 접미사와 정밀도 접미사를 붙여서 만듭니다.
 BASE_RUN_ID = "colab27b_base_bf16"
 FT_RUN_ID = "colab27b_ft_bf16"
+
+# --- 데이터 분할 ---
 SPLIT_FILE = "artifacts/data/split_fold0.json"     # 팀 공식 학습 분할 (train_fold1234, 5,358문항)
 VAL_IDS_FILE = "fold_csv_files/val_fold0.csv"      # 팀 공식 검증 분할 (fold 0, 1,344문항)
 VAL_OUT_BASE = "fold0_base"
 VAL_OUT_FT = "fold0_ft"
+TEST_OUT_BASE = "test_base"
+TEST_OUT_FT = "test_ft"
 N_TEST_ITEMS = 6714
 
-AUTO_RESTART = 3                  # 비정상 종료 시 다시 띄울 횟수입니다. 0이면 재시작하지 않습니다.
-ALSO_BASE = True                  # FT 추론과 같은 forward에서 base 확률도 함께 남깁니다.
+# --- 선택 단계: 프롬프트 비교 ---
+RUN_PROMPT_COMPARE = False        # True로 바꾸면 아래 프롬프트로 fold 0을 한 번 더 추론합니다.
+COMPARE_PROMPT_ID = "v2_read_text"
 
-MONITOR_MINUTES = 30              # 감시 셀이 돌 시간
-MONITOR_INTERVAL_SEC = 60
+# --- preflight ---
+PREFLIGHT_TRAIN_STEPS = 8
+PREFLIGHT_INFER_ITEMS = 20
+
+# --- job 실행 ---
+AUTO_RESTART = 3                  # 비정상 종료 시 다시 띄울 횟수입니다. 1 이상이어야 합니다.
+ALSO_BASE = True                  # FT 추론과 같은 forward에서 base 확률도 함께 남깁니다.
+JOB_POLL_SEC = 30                 # 기다리는 셀이 상태를 확인하는 간격입니다.
+MIN_FREE_GB = 0                   # GPU 여유 메모리 하한입니다. 0이면 정밀도에 맞춰 자동으로 정합니다.
 ''', parameters=True))
+
+    cells.append(md("""
+## 2. Drive 연결
+
+checkpoint와 예측 파일은 모두 Drive에 남습니다. 가상 머신이 회수되어도 Drive의 내용은
+그대로이므로, 다시 접속한 다음에 이어서 실행할 수 있습니다.
+"""))
 
     cells.append(code(r'''
 from google.colab import drive
@@ -2367,27 +2533,62 @@ print("Drive를 연결했습니다.")
 '''))
 
     cells.append(md("""
-### 0-0. 코드 가져오기
+## 3. 코드 가져오기와 부트스트랩
 
-가상 머신이 회수되면 `/content` 아래가 전부 사라지므로 코드도 함께 사라집니다. 부트스트랩 셀이
-`PROJECT_ROOT` 로 작업 디렉터리를 옮기기 전에 이 셀로 코드를 먼저 확보해야 합니다. 인증 준비
-방법은 `20_colab_27b_setup_preflight.ipynb` 의 1-1절에 정리되어 있습니다. 요약하면 이 저장소에만
-Contents 읽기 권한을 준 fine-grained personal access token을 Colab 비밀 `GITHUB_TOKEN` 으로
-등록하거나, 코드 zip을 Drive에 올리고 `CODE_ZIP` 에 경로를 적으면 됩니다.
+가상 머신이 회수되면 `/content` 아래가 전부 사라지므로 코드도 함께 사라집니다. 부트스트랩
+셀이 `PROJECT_ROOT` 로 작업 디렉터리를 옮기기 전에, 아래 셀이 코드를 먼저 확보합니다. 인증을
+준비하는 방법은 `20_colab_27b_setup_preflight.ipynb` 의 1-1절에 정리해 두었습니다. 요약하면
+이 저장소에만 Contents 읽기 권한을 준 fine-grained personal access token을 Colab 비밀
+`GITHUB_TOKEN` 으로 등록하거나, 코드 zip을 Drive에 올리고 `CODE_ZIP` 에 그 경로를 적으면
+됩니다. 셀은 토큰을 화면과 로그 어디에도 남기지 않습니다.
 
-주의할 점이 하나 있습니다. 이미 돌고 있는 job은 이미 읽어 들인 코드로 계속 실행되므로, 지금
-`git pull` 을 해도 그 job은 영향을 받지 않습니다. 다만 코드나 config가 바뀐 상태에서 job을 다시
-띄우면 `--resume auto` 가 config 해시 불일치를 이유로 재개를 거부할 수 있습니다. 따라서 코드
-갱신은 job과 job 사이, 즉 실행 중인 작업이 없을 때에만 하십시오.
+이미 돌고 있는 job은 이미 읽어 들인 코드로 계속 실행되므로 지금 `git pull` 을 해도 영향을
+받지 않습니다. 다만 코드나 config가 바뀐 상태에서 job을 다시 띄우면 `--resume auto` 가 config
+해시 불일치를 이유로 재개를 거부할 수 있습니다. 그러므로 코드 갱신은 실행 중인 작업이 없는
+사이에만 하십시오.
 """))
 
     cells.append(code(CODE_FETCH))
 
-    cells.append(code(BOOT))
+    cells.append(code(BOOT + CODE_VERSION_LOG))
 
-    cells.append(code(CODE_VERSION_LOG + r'''
+    cells.append(md("""
+## 4. 환경 설치와 확인
 
-# --- 20번 노트북이 내린 결정을 그대로 따릅니다 ---
+Colab은 노트북 하나마다 가상 머신을 하나씩 따로 배정합니다. 그래서 20번 노트북에서 설치를
+끝냈더라도 이 노트북의 가상 머신에는 아무 패키지도 깔려 있지 않습니다. 2026-09-21에 27B
+작업이 `Using bitsandbytes 4-bit quantization requires bitsandbytes` 오류로 세 번 죽은 원인이
+바로 이것입니다.
+
+작업을 시작하기 전에 런타임 메뉴의 세션 관리 화면에서 다른 노트북의 세션을 반드시 종료하십시오.
+A100 두 대가 동시에 돌면 compute unit이 두 배로 빠지고, 80GB를 배정받을 확률도 떨어집니다.
+
+아래 셀은 가속 커널인 fla도 함께 설치하고 확인합니다. Qwen3.5의 Gated DeltaNet은 이 패키지가
+있으면 전용 커널을 쓰고, 없으면 PyTorch 참조 구현으로 내려갑니다. 2026-09-21 Colab A100에서
+bf16 학습이 microbatch당 7.3초로 참고 실행의 3.37초보다 두 배 이상 느렸던 원인이 이
+fallback이었습니다. 설치에 실패하더라도 학습 자체는 가능하므로 셀은 멈추지 않고 경고만 크게
+출력합니다. 그 경고를 보면 일정을 두 배로 잡아야 할지 먼저 판단하십시오.
+"""))
+
+    cells.append(code(ENV_SETUP))
+
+    cells.append(md("""
+## 5. GPU 확인과 정밀도, run-id 결정
+
+정밀도는 20번 노트북이 남긴 `colab_choice.json` 이 아니라 지금 이 가상 머신의 VRAM을 직접
+재서 정합니다. 20번이 40GB에서 고른 nf4가 80GB 가상 머신까지 따라와서 조용히 nf4로 돌아간
+사고가 있었기 때문입니다. `colab_choice.json` 은 참고 정보로만 출력하며, 파라미터 셀에서
+`CONFIG` 를 직접 적었다면 그 값이 무엇보다 우선합니다.
+
+run-id는 프롬프트와 정밀도가 다른 결과가 한 폴더에 섞이지 않도록 다음 규칙으로 만듭니다.
+
+- `PROMPT_ID` 가 `v1_image_only` 이면 접미사를 붙이지 않고 기본 이름을 그대로 씁니다.
+- 그 밖의 프롬프트이면 `_<PROMPT_ID>` 를 붙입니다.
+- 정책이 bf16인데 VRAM이 모자라서 nf4로 내려가면 `_nf4` 를 덧붙이고 학습을 막습니다.
+"""))
+
+    cells.append(code(r'''
+# --- 가중치 캐시 위치를 정합니다 ---
 _snap_path = RUN_ROOT_P / "model_snapshot.json"
 if _snap_path.exists():
     _snap = json.loads(_snap_path.read_text(encoding="utf-8"))
@@ -2408,16 +2609,11 @@ MODEL_ROOT_P.mkdir(parents=True, exist_ok=True)
 os.environ["VQA_MODEL_ROOT"] = str(MODEL_ROOT_P)
 os.environ["HF_HOME"] = str(MODEL_ROOT_P)
 
-# --- 지금 이 가상 머신의 VRAM을 직접 재서 정밀도를 정합니다 ---
-# 20번 노트북의 colab_choice.json은 그 가상 머신의 GPU로 고른 값이라서 그대로 따르지 않습니다.
-# 오늘 40GB에서 고른 nf4가 80GB 가상 머신까지 따라와서 조용히 nf4로 돌아간 사고가 있었습니다.
-BF16_CONFIG = "configs/colab_qwen35_27b_bf16.yaml"
-NF4_CONFIG = "configs/colab_qwen35_27b_nf4.yaml"
-
+# --- 지금 이 가상 머신의 VRAM을 직접 잽니다 ---
 VRAM_GB = 0.0
-_smi = run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
-           check=False, quiet=True, echo=False)
 GPU_NAME = None
+_smi = run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+           check=False, quiet=True, echo=False, hint=False)
 if _smi["rc"] == 0 and _smi["output"].strip():
     _parts = [x.strip() for x in _smi["output"].strip().splitlines()[0].split(",")]
     GPU_NAME = _parts[0]
@@ -2425,22 +2621,23 @@ if _smi["rc"] == 0 and _smi["output"].strip():
 else:
     print("nvidia-smi를 쓸 수 없습니다. 런타임 유형이 GPU인지 확인하십시오.")
 
-RUN_SUFFIX = ""
+# --- 정밀도를 정합니다 ---
+PRECISION_SUFFIX = ""
 TRAINING_ALLOWED = True
 
 if PRECISION_POLICY == "nf4":
-    CONFIG, PRECISION = NF4_CONFIG, "nf4"
+    RESOLVED_CONFIG, PRECISION = NF4_CONFIG, "nf4"
 elif PRECISION_POLICY == "auto":
     if VRAM_GB >= 70:
-        CONFIG, PRECISION = BF16_CONFIG, "bf16"
+        RESOLVED_CONFIG, PRECISION = BF16_CONFIG, "bf16"
     else:
-        CONFIG, PRECISION = NF4_CONFIG, "nf4"
+        RESOLVED_CONFIG, PRECISION = NF4_CONFIG, "nf4"
 elif PRECISION_POLICY == "bf16":
     if VRAM_GB >= 70:
-        CONFIG, PRECISION = BF16_CONFIG, "bf16"
+        RESOLVED_CONFIG, PRECISION = BF16_CONFIG, "bf16"
     else:
-        CONFIG, PRECISION = NF4_CONFIG, "nf4"
-        RUN_SUFFIX = "_nf4"
+        RESOLVED_CONFIG, PRECISION = NF4_CONFIG, "nf4"
+        PRECISION_SUFFIX = "_nf4"
         TRAINING_ALLOWED = False
         print("=" * 72)
         print("경고: 팀 정책은 bf16인데 이 GPU의 VRAM은 %.1fGB뿐입니다." % VRAM_GB)
@@ -2453,119 +2650,57 @@ else:
     raise RuntimeError(
         "PRECISION_POLICY 는 bf16, auto, nf4 중 하나여야 합니다: %r" % (PRECISION_POLICY,))
 
-# 이 셀을 여러 번 실행해도 접미사가 겹쳐 붙지 않도록 먼저 떼어 내고 다시 붙입니다.
-def _with_suffix(run_id):
-    if run_id.endswith("_nf4"):
-        run_id = run_id[: -len("_nf4")]
-    return run_id + RUN_SUFFIX
+# 파라미터 셀에서 CONFIG를 직접 적었다면 그 값이 언제나 우선합니다.
+if CONFIG:
+    RESOLVED_CONFIG = CONFIG
+    print("파라미터 셀의 CONFIG를 그대로 사용합니다:", RESOLVED_CONFIG)
+CONFIG = RESOLVED_CONFIG
+if not Path(CONFIG).exists():
+    raise RuntimeError("config 파일이 없습니다: %s" % CONFIG)
+
+# --- run-id를 확정합니다 ---
+PROMPT_SUFFIX = "" if PROMPT_ID == "v1_image_only" else "_" + PROMPT_ID
 
 
-BASE_RUN_ID = _with_suffix(BASE_RUN_ID)
-FT_RUN_ID = _with_suffix(FT_RUN_ID)
+def resolve_run_id(stem, prompt_id=None):
+    """기본 이름에 프롬프트 접미사와 정밀도 접미사를 붙여 실제 run-id를 만듭니다."""
+    suffix = "" if (prompt_id or PROMPT_ID) == "v1_image_only" else "_" + (prompt_id or PROMPT_ID)
+    return stem + suffix + PRECISION_SUFFIX
 
+
+BASE_RUN = resolve_run_id(BASE_RUN_ID)
+FT_RUN = resolve_run_id(FT_RUN_ID)
+CMP_RUN = resolve_run_id(BASE_RUN_ID, COMPARE_PROMPT_ID)
+
+if not MIN_FREE_GB:
+    MIN_FREE_GB = 60 if PRECISION == "bf16" else 20
+
+print()
 print("GPU              : %s / VRAM %.1fGB" % (GPU_NAME, VRAM_GB))
 print("정밀도 정책      : %s -> %s" % (PRECISION_POLICY, PRECISION))
-print("적용 중인 config : %s (존재: %s)" % (CONFIG, Path(CONFIG).exists()))
-print("base run-id      :", BASE_RUN_ID)
-print("ft run-id        :", FT_RUN_ID)
-print("학습 허용        :", TRAINING_ALLOWED)
-print("가중치 캐시      :", os.environ["VQA_MODEL_ROOT"])
+print("적용 중인 config : %s" % CONFIG)
+print("프롬프트         : %s" % PROMPT_ID)
+print("base run-id      : %s" % BASE_RUN)
+print("ft run-id        : %s" % FT_RUN)
+print("비교용 run-id    : %s (선택 단계에서만 사용합니다)" % CMP_RUN)
+print("학습 허용        : %s" % TRAINING_ALLOWED)
+print("GPU 여유 하한    : %s GB" % MIN_FREE_GB)
+print("가중치 캐시      : %s" % os.environ["VQA_MODEL_ROOT"])
 
 _choice_path = RUN_ROOT_P / "colab_choice.json"
 if _choice_path.exists():
     _choice = json.loads(_choice_path.read_text(encoding="utf-8"))
+    print()
     print("참고: 20번 노트북은 VRAM %s GB에서 %s 를 골랐습니다 (정책 %s)."
           % (_choice.get("vram_gb"), _choice.get("config"), _choice.get("policy", "미기록")))
+    print("이 값은 참고로만 출력하며, 지금 실행에는 위에서 정한 값을 씁니다.")
 '''))
 
     cells.append(md("""
-### 0-1. 환경 설치와 확인
+## 6. 데이터 준비
 
-Colab은 노트북 하나마다 가상 머신을 하나씩 따로 배정합니다. 그래서 20번 노트북에서 설치를
-끝냈더라도 이 노트북의 가상 머신에는 아무 패키지도 깔려 있지 않습니다. 오늘 27B 작업이
-`Using bitsandbytes 4-bit quantization requires bitsandbytes` 오류로 세 번 죽은 원인이 바로
-이것입니다.
-
-작업을 시작하기 전에 런타임 메뉴의 세션 관리 화면에서 다른 노트북의 세션을 반드시 종료하십시오.
-A100 두 대가 동시에 돌면 compute unit이 두 배로 빠지고, 80GB를 받을 확률도 떨어집니다. 새
-가상 머신을 받은 다음에는 0번 절을 코드 가져오기부터 데이터 준비와 설치까지 빠짐없이 실행한
-뒤에 job을 시작하십시오.
-"""))
-
-    cells.append(code(ENV_SETUP))
-
-    cells.append(code(r'''
-JOB_EXTRA =["--auto-restart", str(AUTO_RESTART)] if AUTO_RESTART else []
-ALSO_BASE_ARGS = ["--also-base"] if ALSO_BASE else []
-
-OVERRIDES = []
-frozen_path = Path("artifacts/input_config_frozen.json")
-if frozen_path.exists():
-    frozen = json.loads(frozen_path.read_text(encoding="utf-8"))
-    OVERRIDES += ["--set", "prompt_id=%s" % frozen["prompt_id"]]
-    mp = frozen.get("max_pixels", {}).get("colab_qwen35_27b")
-    if mp:
-        OVERRIDES += ["--set", "max_pixels=%d" % mp]
-
-JOBS = {
-    "base_val": None, "base_test": None, "train": None, "ft_val": None, "ft_test": None,
-}
-
-def job_start(name, cmd, extra=True):
-    args = [PY, "-m", "vqa.jobs", "start", "--name", name]
-    if extra:
-        args += JOB_EXTRA
-    args += ["--"] + [str(c) for c in cmd]
-    return run(args, check=False)
-
-
-def job_status(name):
-    res = run([PY, "-m", "vqa.jobs", "status", "--name", name],
-              check=False, quiet=True, hint=False)
-    out = res["output"].strip()
-    if res["rc"] == 0:
-        print(out)
-    elif "기록 없음" in out:
-        print("job %s: 아직 시작하지 않았습니다." % name)
-    else:
-        print(out)
-        print("실패했습니다. 같은 명령에 --help 를 붙여서 인자 이름부터 확인하십시오.", flush=True)
-    return res
-
-
-print("config    :", CONFIG)
-print("job 옵션  :", JOB_EXTRA or "(없음)")
-print("입력 설정 :", OVERRIDES or "(config 기본값)")
-'''))
-
-    cells.append(md("""
-### 0-2. 현재 job 상태 확인
-
-재접속했다면 이 셀부터 실행하십시오. 아직 실행하지 않은 뒷부분 섹션의 job은 "아직 시작하지
-않았습니다"라고 나오는 것이 정상이니 걱정하지 않아도 됩니다.
-"""))
-
-    cells.append(code(r'''
-JOB_NAMES = [BASE_RUN_ID + "_val", BASE_RUN_ID + "_test",
-             FT_RUN_ID + "_train", FT_RUN_ID + "_val", FT_RUN_ID + "_test"]
-for name in JOB_NAMES:
-    print("=" * 60)
-    print("job:", name)
-    job_status(name)
-
-data_ok = (Path(DATA_ROOT) / "train.csv").exists()
-print()
-print("로컬 데이터 존재:", data_ok)
-if not data_ok:
-    print("가상 머신이 회수된 것으로 보입니다. 아래 데이터 준비 셀을 먼저 실행하십시오.")
-'''))
-
-    cells.append(md("""
-### 0-3. 가상 머신이 회수된 경우의 데이터 재준비
-
-이 셀을 실행한 뒤에 원래 실행했던 시작 셀을 그대로 다시 실행하면 됩니다. checkpoint는 Drive에
-남아 있으므로 학습은 저장된 step부터 이어집니다. 압축 파일에 암호가 없다면 파라미터 셀의
-`ARCHIVE_PASSWORD` 에 `none` 이라고 적으십시오.
+압축 파일을 로컬 디스크에 풉니다. 이미 풀려 있으면 아무 일도 하지 않습니다. 압축 파일에
+암호가 없다면 파라미터 셀의 `ARCHIVE_PASSWORD` 에 `none` 이라고 적으십시오.
 """))
 
     cells.append(code(DATA_STAGE + r'''
@@ -2577,22 +2712,664 @@ print("VQA_DATA_ROOT:", os.environ["VQA_DATA_ROOT"])
 '''))
 
     cells.append(md("""
-## 1. 백그라운드 실행 확인 절차 (D1에 한 번만)
+## 7. 실행 도우미
 
-Pro+의 백그라운드 실행이 이 계정에서 실제로 어떻게 동작하는지 직접 확인합니다. 안내 문구만 믿고
-밤새 실행을 맡기면 안 됩니다.
+아래 셀은 이 노트북이 쓰는 도우미 함수를 정의합니다. 직접 고칠 일은 없습니다.
+
+`gpu_step` 은 GPU를 쓰는 작업 하나를 띄우고 끝날 때까지 기다립니다. `vqa.jobs start` 는 같은
+run-root에 살아 있는 job이 있으면 시작을 거부하고, `--min-free-gb` 로 지정한 만큼 GPU 여유
+메모리가 없어도 거부합니다. 이 두 가지가 작업이 겹쳐서 out of memory가 나는 상황을 막아 줍니다.
+
+모든 job은 `--auto-restart` 와 함께 띄웁니다. 이 옵션이 없으면 종료 코드를 기록해 줄 감시
+프로세스가 붙지 않고, 그러면 `vqa.jobs wait` 가 작업의 성공과 실패를 구분하지 못한 채 언제나
+0을 돌려줍니다. 실패한 작업을 성공으로 잘못 읽으면 그 뒤의 단계가 모두 어긋나므로, 아래 셀은
+`AUTO_RESTART` 가 0이면 그 자리에서 멈춥니다. `gpu_step` 에 `auto_restart` 인자를 주면 그
+단계에서만 재시작 횟수를 다르게 정할 수 있습니다. 같은 이유로 1보다 작은 값은 받지 않습니다.
+
+`post_train_ready` 는 15번 절부터 17번 절까지의 셀이 학습과 겹치지 않게 막아 줍니다. 학습
+job이 아직 살아 있거나 `final_adapter` 가 아직 없으면, 이 함수가 안내만 출력하고 거짓을
+돌려주므로 해당 셀은 아무 일도 하지 않고 끝납니다. 그래서 메뉴의 "모두 실행"을 눌러도 학습을
+띄운 직후에 추론이 따라 들어가지 않습니다.
+
+`OVERRIDES` 에는 파라미터 셀의 `PROMPT_ID` 가 항상 들어갑니다. 11번 노트북이 동결한
+`artifacts/input_config_frozen.json` 이 있으면 거기에서 해상도만 함께 가져옵니다. 동결 파일에
+적힌 프롬프트는 쓰지 않습니다. 이 노트북에서 무엇으로 실행했는지가 파라미터 셀 하나만 보면
+드러나야 하기 때문입니다.
+"""))
+
+    cells.append(code(r'''
+# --- 명령에 공통으로 붙는 인자 ---
+# --auto-restart 없이 띄운 job에는 종료 코드를 기록해 줄 감시 프로세스가 붙지 않습니다. 그러면
+# vqa.jobs wait 가 성공과 실패를 구분하지 못하고 언제나 0을 돌려주므로, 실패를 성공으로 잘못
+# 읽게 됩니다. 그래서 이 노트북은 모든 job을 --auto-restart 와 함께 띄웁니다.
+if not AUTO_RESTART:
+    raise RuntimeError(
+        "AUTO_RESTART 가 0입니다. 감시 프로세스가 붙지 않아 vqa.jobs wait 가 작업의 성공과 "
+        "실패를 구분하지 못합니다. 파라미터 셀에서 AUTO_RESTART 를 1 이상으로 고치고 "
+        "(권장값은 3입니다) 이 셀을 다시 실행하십시오."
+    )
+JOB_EXTRA = ["--auto-restart", str(AUTO_RESTART)]
+ALSO_BASE_ARGS = ["--also-base"] if ALSO_BASE else []
+
+OVERRIDES = ["--set", "prompt_id=%s" % PROMPT_ID]
+_frozen_path = Path("artifacts/input_config_frozen.json")
+if _frozen_path.exists():
+    _frozen = json.loads(_frozen_path.read_text(encoding="utf-8"))
+    _mp = (_frozen.get("max_pixels") or {}).get("colab_qwen35_27b")
+    if _mp:
+        OVERRIDES += ["--set", "max_pixels=%d" % _mp]
+        print("동결 파일에서 max_pixels=%d 를 가져왔습니다." % _mp)
+    if _frozen.get("prompt_id") and _frozen["prompt_id"] != PROMPT_ID:
+        print("참고: 동결 파일의 프롬프트는 %s 이지만 이번 실행은 %s 를 씁니다."
+              % (_frozen["prompt_id"], PROMPT_ID))
+
+
+def overrides_for(prompt_id):
+    """프롬프트만 바꾼 override 목록을 만듭니다. 비교 단계에서 씁니다."""
+    out = list(OVERRIDES)
+    for index, item in enumerate(out):
+        if isinstance(item, str) and item.startswith("prompt_id="):
+            out[index] = "prompt_id=%s" % prompt_id
+    return out
+
+
+def pred_file(run_id, out_name):
+    """예측 결과 CSV의 경로입니다."""
+    return RUN_ROOT_P / run_id / "preds" / (out_name + ".csv")
+
+
+def pred_done(run_id, out_name):
+    """예측이 끝까지 완료되었는지 봅니다. manifest는 마지막에만 기록됩니다."""
+    return Path(str(pred_file(run_id, out_name)) + ".manifest.json").exists()
+
+
+def job_status(name):
+    res = run([PY, "-m", "vqa.jobs", "status", "--name", name],
+              check=False, quiet=True, hint=False, echo=False)
+    out = res["output"].strip()
+    if res["rc"] == 0:
+        print(out)
+    elif "기록 없음" in out:
+        print("job %s: 아직 시작하지 않았습니다." % name)
+    else:
+        print(out)
+    return res
+
+
+def job_alive(name):
+    """job이 아직 돌고 있는지 봅니다. 감시 프로세스와 실제 작업 프로세스를 모두 확인합니다."""
+    res = run([PY, "-m", "vqa.jobs", "status", "--name", name, "--json"],
+              check=False, quiet=True, hint=False, echo=False)
+    text = res["output"].strip()
+    if not text:
+        return False
+    try:
+        status = json.loads(text)
+    except ValueError:
+        return False
+    return bool(status.get("any_alive"))
+
+
+# 학습이 끝난 뒤에 쓰는 adapter의 위치입니다. 학습 전에도 이름만은 정의해 두어야 뒤의 셀들이
+# NameError 없이 안내만 출력하고 넘어갈 수 있습니다.
+ADAPTER = str(RUN_ROOT_P / FT_RUN / "final_adapter")
+
+
+def post_train_ready():
+    """학습 이후 단계를 지금 실행해도 되는지 판정하고, 되지 않으면 이유를 설명합니다.
+
+    메뉴의 "모두 실행"을 누르면 학습을 띄운 직후에 아래쪽 셀들이 곧바로 이어서 실행됩니다.
+    그대로 두면 학습과 추론이 GPU 한 장을 함께 쓰게 되므로, 학습 job이 아직 살아 있거나
+    final_adapter가 아직 만들어지지 않았으면 아무 일도 하지 않고 안내만 출력합니다.
+    """
+    train_job = FT_RUN + "_train"
+    if job_alive(train_job):
+        print("학습 job %s 이 아직 돌고 있으므로 이 셀은 건너뜁니다." % train_job)
+        print("14번 절의 상태 확인 셀로 남은 시간을 확인하시고, 학습이 끝난 다음에 이 셀을")
+        print("다시 실행하십시오. 지금 실행하면 GPU를 함께 쓰게 되어 out of memory가 납니다.")
+        return False
+    if not Path(ADAPTER).is_dir():
+        print("학습된 adapter가 아직 없으므로 이 셀은 건너뜁니다: %s" % ADAPTER)
+        print("13번 절에서 학습을 시작하고, 학습이 끝난 뒤에 이 셀을 다시 실행하십시오.")
+        return False
+    return True
+
+
+def gpu_step(name, cmd, *, done=False, wait=True, min_free_gb=None, poll=None, auto_restart=None):
+    """GPU 작업 하나를 띄우고 끝날 때까지 기다립니다.
+
+    done이 True이면 이미 끝난 작업이므로 모델을 올리지 않고 건너뜁니다.
+    wait가 False이면 띄우기만 합니다. 학습에만 씁니다.
+    auto_restart를 주면 이 단계에서만 재시작 횟수를 AUTO_RESTART 대신 그 값으로 씁니다.
+    실패가 결정론적인 단계에서 27B 모델을 여러 번 다시 올리지 않기 위해서입니다.
+    0은 받지 않습니다. 감시 프로세스가 붙지 않으면 wait가 실패를 성공으로 돌려주기 때문입니다.
+    """
+    if done:
+        print("이미 끝나 있으므로 건너뜁니다: %s" % name)
+        return "skipped"
+
+    if auto_restart is None:
+        extra = JOB_EXTRA
+    elif int(auto_restart) < 1:
+        raise ValueError(
+            "auto_restart 는 1 이상이어야 합니다. 0이면 감시 프로세스가 붙지 않아 "
+            "vqa.jobs wait 가 작업의 성공과 실패를 구분하지 못합니다."
+        )
+    else:
+        extra = ["--auto-restart", str(int(auto_restart))]
+
+    args = [PY, "-m", "vqa.jobs", "start", "--name", name] + extra
+    free_gb = MIN_FREE_GB if min_free_gb is None else min_free_gb
+    if free_gb:
+        args += ["--min-free-gb", str(free_gb)]
+    args += ["--"] + [str(c) for c in cmd]
+
+    started = run(args, check=False)
+    if started["rc"] != 0:
+        raise RuntimeError(
+            "job %s 을 시작하지 못했습니다. 위 출력을 확인하십시오. 다른 job이 아직 돌고 있으면 "
+            "그 job이 끝난 뒤에 이 셀을 다시 실행하면 됩니다. GPU 여유 메모리가 모자란다는 "
+            "메시지가 보이면 런타임을 재시작한 다음 4번 절부터 다시 실행하십시오." % name
+        )
+    if not wait:
+        print("job %s 을 띄웠습니다. 이 셀은 기다리지 않고 끝납니다." % name)
+        return "started"
+
+    print("job %s 이 끝날 때까지 기다립니다. 이 셀을 멈춰도 job은 계속 돌아갑니다." % name)
+    waited = run([PY, "-m", "vqa.jobs", "wait", "--name", name,
+                  "--poll", str(poll or JOB_POLL_SEC)], check=False)
+    if waited["rc"] == 0:
+        print("job %s 이 정상으로 끝났습니다." % name)
+        return "done"
+    if waited["rc"] == 2:
+        raise RuntimeError(
+            "job %s 을 기다리는 동안 제한 시간을 넘겼습니다. job은 아직 돌고 있을 수 있으므로 "
+            "`python -m vqa.jobs status --name %s` 로 확인하십시오." % (name, name)
+        )
+    raise RuntimeError(
+        "job %s 이 실패로 끝났습니다. `python -m vqa.jobs tail --name %s --lines 40` 으로 "
+        "마지막 로그를 읽고 원인을 확인하십시오." % (name, name)
+    )
+
+
+def evaluate(pred_path, out_prefix, note):
+    """예측 파일을 fold 0 정답과 비교합니다. GPU를 쓰지 않습니다."""
+    Path("artifacts/eval").mkdir(parents=True, exist_ok=True)
+    return script("evaluate_run.py",
+                  "--pred", str(pred_path),
+                  "--gold", str(DATA_ROOT_P / "train.csv"),
+                  "--val-ids", VAL_IDS_FILE,
+                  "--wrong-out", "artifacts/eval/%s_wrong.csv" % out_prefix,
+                  "--json-out", "artifacts/eval/%s.json" % out_prefix,
+                  "--note", note,
+                  check=False)
+
+
+def make_submission(pred_path, out_path):
+    """예측 파일에서 제출 파일을 만들고 검사기까지 돌립니다."""
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    sample = str(DATA_ROOT_P / "sample_submission.csv")
+    vqa("submit", "--pred", str(pred_path), "--sample", sample, "--out", str(out_path))
+    script("check_submission.py", "--submission", str(out_path), "--sample", sample)
+    print()
+    print("제출 후보: %s" % out_path)
+    print("sha256   : %s" % sha256_of(out_path))
+
+
+print("config    :", CONFIG)
+print("job 옵션  :", JOB_EXTRA or "(없음)")
+print("입력 설정 :", OVERRIDES)
+'''))
+
+    cells.append(md("""
+## 8. preflight
+
+본 학습에 들어가기 전에 토큰과 템플릿, label 위치, 해상도 적용, 커널 경로를 한 번에
+점검합니다. 이 점검이 걸러 내는 것은 몇 시간 뒤에야 드러나는 종류의 실패입니다.
+
+결과에서 특히 두 항목을 확인하십시오.
+
+- `pixel_limits` 는 설정한 `min_pixels` 와 `max_pixels` 가 processor에 실제로 적용되었는지를
+  가장 큰 이미지와 가장 작은 이미지로 직접 확인합니다. 시각 토큰 수가 기대 상한을 넘으면
+  FAIL로 표시됩니다.
+- `kernel_fast_path` 는 Gated DeltaNet이 가속 커널을 쓰는지 봅니다. 참조 구현으로 내려갔으면
+  WARN으로 표시하고 설치 명령을 함께 알려 줍니다. 학습 자체는 가능하므로 종료 코드는 0입니다.
+  다만 학습 시간이 약 두 배가 되므로 그대로 진행할지 먼저 판단하십시오.
+
+preflight도 분리 프로세스로 뜨기 때문에 그 출력은 모두 로그 파일에 쌓입니다. 그래서 아래 셀은
+작업이 끝난 다음에 결과 JSON을 읽어, 검사별 PASS/WARN/FAIL과 속도 측정값을 이 자리에 다시
+출력합니다. 검사가 실패한 경우에도 요약을 먼저 출력하고 그 다음에 오류를 알립니다. 또한
+preflight의 실패는 대부분 다시 실행해도 같은 자리에서 반복되므로, 이 단계에서만 재시작 횟수를
+1로 낮춰 두었습니다.
+"""))
+
+    cells.append(code(r'''
+# preflight의 FAIL은 대개 결정론적이라 다시 띄워도 같은 자리에서 실패합니다. 27B 모델을 여러
+# 번 올리며 수십 분을 버리지 않도록 이 단계만 재시작 횟수를 1로 낮춥니다.
+PREFLIGHT_RESTARTS = 1
+PF_JOB = "preflight_" + PRECISION
+
+
+def preflight_results():
+    """preflight가 남긴 결과 JSON 목록입니다. 파일 이름이 타임스탬프라 정렬하면 시간순입니다."""
+    pf_dir = RUN_ROOT_P / "preflight"
+    return sorted(pf_dir.glob("*.json")) if pf_dir.is_dir() else []
+
+
+def show_preflight_summary(before):
+    """preflight의 출력은 job 로그로 가므로, 결과 JSON을 읽어 요약을 이 셀에 다시 찍습니다."""
+    fresh = [p for p in preflight_results() if p not in before]
+    if not fresh:
+        print()
+        print("이번 실행의 preflight 결과 JSON을 찾지 못했습니다. 결과를 쓰기 전에 끝났을 수 있습니다.")
+        print("`python -m vqa.jobs tail --name %s --lines 80` 으로 로그를 직접 확인하십시오." % PF_JOB)
+        return
+    path = fresh[-1]
+    data = json.loads(path.read_text(encoding="utf-8"))
+    results = data.get("results") or []
+    counts = {}
+    for item in results:
+        counts[item.get("status")] = counts.get(item.get("status"), 0) + 1
+    print()
+    print("=" * 68)
+    print("PREFLIGHT %s  (%s)"
+          % (data.get("overall"), "  ".join("%s=%d" % kv for kv in sorted(counts.items()))))
+    print("=" * 68)
+    for item in results:
+        line = "  %-4s %s" % (item.get("status"), item.get("name"))
+        if item.get("reason"):
+            line += " - %s" % item["reason"]
+        print(line)
+
+    def show_detail(check_name, title, keys):
+        for item in results:
+            if item.get("name") != check_name:
+                continue
+            detail = item.get("detail") or {}
+            picked = [(k, detail[k]) for k in keys if k in detail]
+            if not picked:
+                continue
+            print()
+            print(title)
+            for key, value in picked:
+                print("  %-24s : %s" % (key, value))
+
+    show_detail("forward_backward", "학습 속도 (microbatch 1개 기준)",
+                ("sec_per_microbatch_mean", "sec_prepare_mean", "sec_compute_mean",
+                 "sec_per_optimizer_step", "peak_vram_gb"))
+    show_detail("inference", "추론 속도 (문항 1개 기준)",
+                ("seconds_per_item", "sec_prepare_mean", "sec_compute_mean"))
+    print()
+    print("기록: %s" % path)
+
+
+cmd = [PY, "-m", "vqa.preflight",
+       "--config", CONFIG,
+       "--n-train-steps", str(PREFLIGHT_TRAIN_STEPS),
+       "--n-infer", str(PREFLIGHT_INFER_ITEMS)] + OVERRIDES
+_pf_before = preflight_results()
+try:
+    gpu_step(PF_JOB, cmd, auto_restart=PREFLIGHT_RESTARTS)
+finally:
+    # 실패했더라도 어느 검사가 걸렸는지 먼저 보이게 하고, 그 다음에 예외가 올라가게 합니다.
+    show_preflight_summary(_pf_before)
+'''))
+
+    cells.append(md("""
+## 9. fold 0을 원본 27B로 추론하고 평가합니다
+
+학습하지 않은 27B로 팀 공식 검증 분할을 추론합니다. 결합 가중치를 고를 때 쓰는 기준 확률이고,
+학습이 실제로 도움이 되었는지 판단할 때의 비교 대상이기도 하므로 반드시 먼저 확보해야 합니다.
+
+진행 상황을 따로 보고 싶으면 다른 셀에서 `python -m vqa.jobs tail --name <job 이름> --lines 20`
+을 실행하십시오. Drive에서 가중치를 읽어 오는 데 수 분이 걸리므로 첫 진행 로그가 나오기까지
+시간이 걸립니다.
+"""))
+
+    cells.append(code(r'''
+cmd = [PY, "-m", "vqa.predict",
+       "--config", CONFIG, "--run-id", BASE_RUN,
+       "--csv", "train.csv", "--ids-file", VAL_IDS_FILE,
+       "--adapter", "none", "--out-name", VAL_OUT_BASE] + OVERRIDES
+gpu_step(BASE_RUN + "_val", cmd, done=pred_done(BASE_RUN, VAL_OUT_BASE))
+'''))
+
+    cells.append(code(r'''
+evaluate(pred_file(BASE_RUN, VAL_OUT_BASE), BASE_RUN + "_" + VAL_OUT_BASE,
+         "27B 원본, 프롬프트 %s, 정밀도 %s" % (PROMPT_ID, PRECISION))
+'''))
+
+    cells.append(md("""
+## 10. (선택) 프롬프트를 바꾸어 비교합니다
+
+이 절은 선택입니다. `RUN_PROMPT_COMPARE` 가 `False` 이면 아무 일도 하지 않고 넘어갑니다.
+fold 0 전체를 한 번 더 추론하므로 9번 절과 같은 만큼의 GPU 시간이 듭니다. compute unit 예산에
+여유가 있을 때에만 `True` 로 바꾸십시오.
+
+비교 결과는 `COMPARE_PROMPT_ID` 로 만든 별도의 run-id에 저장되므로 9번 절의 결과를 덮어쓰지
+않습니다. 프롬프트 선택은 fold 0에서만 비교하며 test로는 어떤 조정도 하지 않습니다.
+"""))
+
+    cells.append(code(r'''
+if not RUN_PROMPT_COMPARE:
+    print("RUN_PROMPT_COMPARE 가 False이므로 프롬프트 비교를 건너뜁니다.")
+else:
+    cmd = [PY, "-m", "vqa.predict",
+           "--config", CONFIG, "--run-id", CMP_RUN,
+           "--csv", "train.csv", "--ids-file", VAL_IDS_FILE,
+           "--adapter", "none", "--out-name", VAL_OUT_BASE] + overrides_for(COMPARE_PROMPT_ID)
+    gpu_step(CMP_RUN + "_val", cmd, done=pred_done(CMP_RUN, VAL_OUT_BASE))
+'''))
+
+    cells.append(code(r'''
+if not RUN_PROMPT_COMPARE:
+    print("RUN_PROMPT_COMPARE 가 False이므로 프롬프트 비교 평가를 건너뜁니다.")
+else:
+    evaluate(pred_file(CMP_RUN, VAL_OUT_BASE), CMP_RUN + "_" + VAL_OUT_BASE,
+             "27B 원본, 프롬프트 %s" % COMPARE_PROMPT_ID)
+    script("compare_predictions.py",
+           "--pred-a", str(pred_file(BASE_RUN, VAL_OUT_BASE)),
+           "--pred-b", str(pred_file(CMP_RUN, VAL_OUT_BASE)),
+           "--gold", str(DATA_ROOT_P / "train.csv"),
+           "--val-ids", VAL_IDS_FILE,
+           "--label-a", PROMPT_ID, "--label-b", COMPARE_PROMPT_ID,
+           "--json-out", "artifacts/eval/prompt_compare.json",
+           check=False)
+'''))
+
+    cells.append(md("""
+## 11. 전체 test를 원본 27B로 추론합니다
+
+첫 유효 제출과 확률 캐시를 확보하는 단계입니다. 이 작업이 끝나야 수정이 제출을 준비할 수
+있습니다. 문항이 6,714개이므로 fold 0보다 다섯 배쯤 오래 걸립니다.
+"""))
+
+    cells.append(code(r'''
+cmd = [PY, "-m", "vqa.predict",
+       "--config", CONFIG, "--run-id", BASE_RUN,
+       "--csv", "test.csv",
+       "--adapter", "none", "--out-name", TEST_OUT_BASE] + OVERRIDES
+gpu_step(BASE_RUN + "_test", cmd, done=pred_done(BASE_RUN, TEST_OUT_BASE))
+'''))
+
+    cells.append(md("""
+## 12. 원본 모델의 제출 파일을 만들고 검사합니다
+
+검사기를 통과하면 파일과 sha256을 수정에게 넘깁니다. GPU를 쓰지 않는 단계입니다.
+"""))
+
+    cells.append(code(r'''
+make_submission(pred_file(BASE_RUN, TEST_OUT_BASE),
+                "artifacts/submission/%s_base.csv" % BASE_RUN)
+'''))
+
+    cells.append(md("""
+## 13. 학습을 시작합니다
+
+여기부터가 열 시간 안팎이 걸리는 단계입니다. 앞의 셀들과 달리 이 셀은 job을 띄우기만 하고
+기다리지 않습니다. 셀이 끝나더라도 학습은 계속 돌아갑니다.
+
+셀이 끝난 다음에 할 일은 두 가지입니다. 먼저 14번 절의 상태 확인 셀을 실행해서 첫 checkpoint가
+제대로 저장되는지 확인하십시오. `save_every_steps` 가 50이므로 50 step 뒤에 첫 checkpoint가
+생깁니다. 그 확인이 끝나면 이 노트북을 그대로 두고 기다립니다. 15번 절부터는 학습이 끝난 뒤에
+실행하는 셀이며, 학습이 도는 중에 실행하면 그 사실을 알아채고 아무 일도 하지 않은 채 안내만
+출력합니다.
+
+학습을 중간에 멈춰야 하면 `python -m vqa.jobs stop --name <job 이름>` 을 실행하십시오. 학습
+프로세스가 종료 신호를 받아 step 경계에서 checkpoint를 저장한 다음 끝납니다. 다시 시작할
+때에는 이 셀을 그대로 다시 실행하면 저장된 지점에서 이어집니다.
+
+아래 셀은 시작하기 전에 두 가지를 확인합니다. 먼저 지금 GPU가 정책이 요구하는 정밀도를
+감당하는지 보고, 그다음으로 이 run이 이미 다른 정밀도로 시작된 적이 있는지를
+`run_manifest.json` 에서 확인합니다. 정밀도가 다르면 학습을 시작하지 않고 멈춥니다. 같은
+run-id 아래에 bf16 checkpoint와 nf4 checkpoint가 섞이면 이어서 하는 실행을 믿을 수 없게 되기
+때문입니다.
+"""))
+
+    cells.append(code(r'''
+if not TRAINING_ALLOWED:
+    raise RuntimeError(
+        "현재 GPU의 VRAM이 %.1fGB이므로 bf16 학습을 시작하거나 이어서 할 수 없습니다. "
+        "런타임을 끊고 80GB A100으로 다시 연결한 다음 이 셀을 실행하십시오. "
+        "지금 이 가상 머신에서는 추론만 nf4로 돌릴 수 있습니다." % VRAM_GB
+    )
+
+# 이미 시작한 run이라면 그때 쓴 정밀도와 지금 정밀도가 같아야 합니다.
+_manifest_path = RUN_ROOT_P / FT_RUN / "run_manifest.json"
+if _manifest_path.exists():
+    _manifest = json.loads(_manifest_path.read_text(encoding="utf-8"))
+    _prev = str(_manifest.get("config", {}).get("precision", "")).lower()
+    if _prev and _prev != PRECISION:
+        raise RuntimeError(
+            "run %s 은 %s 로 시작했는데 지금 설정은 %s 입니다. 정밀도가 다른 채로 이어서 하면 "
+            "checkpoint가 섞입니다. 같은 정밀도의 GPU로 다시 연결하거나, 다른 run-id를 쓰십시오.\n"
+            "기록 파일: %s" % (FT_RUN, _prev, PRECISION, _manifest_path)
+        )
+    print("run %s 의 기존 정밀도 %s 와 현재 정밀도가 같습니다. 이어서 진행합니다." % (FT_RUN, _prev))
+
+cmd = [PY, "-m", "vqa.train",
+       "--config", CONFIG, "--run-id", FT_RUN,
+       "--split", SPLIT_FILE, "--resume", "auto"] + OVERRIDES
+gpu_step(FT_RUN + "_train", cmd, wait=False)
+'''))
+
+    cells.append(md("""
+## 14. 학습 상태와 속도를 확인합니다
+
+이 셀은 언제든 다시 실행해도 됩니다. GPU를 쓰지 않으므로 학습이 도는 중에 실행해도 안전합니다.
+처음에는 첫 checkpoint가 저장되는지 확인하는 용도로 쓰고, 그 뒤에는 남은 시간을 가늠하는
+용도로 씁니다.
+
+출력에서 확인할 것은 세 가지입니다. `heartbeat.json` 의 갱신 시각이 최근인지, step이 실제로
+늘고 있는지, 그리고 초당 진행 속도가 preflight에서 잰 값과 비슷한지를 보십시오. 속도가 두 배
+가까이 느리다면 가속 커널이 빠진 것이므로 4번 절의 경고를 다시 확인해야 합니다.
+"""))
+
+    cells.append(code(r'''
+WATCH = FT_RUN + "_train"
+print("job 상태")
+job_status(WATCH)
+
+_log_path = RUN_ROOT_P / FT_RUN / "train_log.jsonl"
+_rows = []
+if _log_path.exists():
+    for _line in _log_path.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line:
+            try:
+                _rows.append(json.loads(_line))
+            except ValueError:
+                pass
+
+print()
+if not _rows:
+    print("아직 train_log.jsonl에 기록이 없습니다. 모델을 올리는 중일 수 있습니다.")
+    print("몇 분 뒤에 이 셀을 다시 실행하십시오. 로그는 다음 명령으로도 볼 수 있습니다.")
+    print("  python -m vqa.jobs tail --name %s --lines 40" % WATCH)
+else:
+    _recent = _rows[-8:]
+    print("최근 기록 %d줄" % len(_recent))
+    print("  %8s %10s %12s %12s" % ("step", "loss", "초/step", "peak VRAM"))
+    for _row in _recent:
+        print("  %8s %10.4f %12.2f %12s"
+              % (_row.get("step"), float(_row.get("loss") or 0.0),
+                 float(_row.get("seconds_per_step") or 0.0), _row.get("peak_vram_gb")))
+
+    _last = _rows[-1]
+    _speeds = [float(r["seconds_per_step"]) for r in _recent if r.get("seconds_per_step")]
+    _mean_speed = sum(_speeds) / len(_speeds) if _speeds else 0.0
+    _step = int(_last.get("step") or 0)
+    _total = int(_last.get("total_steps") or 0)
+    _remaining = max(_total - _step, 0)
+    print()
+    print("진행            : %d / %d step (%.1f%%)"
+          % (_step, _total, (100.0 * _step / _total) if _total else 0.0))
+    print("최근 평균 속도  : %.2f 초/optimizer step" % _mean_speed)
+    print("남은 step       : %d" % _remaining)
+    if _mean_speed:
+        _eta = _remaining * _mean_speed
+        print("예상 남은 시간  : %.1f시간 (%.0f분)" % (_eta / 3600.0, _eta / 60.0))
+    print("peak VRAM       : %s GB" % _last.get("peak_vram_gb"))
+
+_hb_path = RUN_ROOT_P / FT_RUN / "heartbeat.json"
+if _hb_path.exists():
+    _hb = json.loads(_hb_path.read_text(encoding="utf-8"))
+    print()
+    print("heartbeat 갱신  : %s" % _hb.get("updated"))
+    print("heartbeat ETA   : %s" % _hb.get("eta_human"))
+
+_latest = RUN_ROOT_P / FT_RUN / "checkpoints" / "latest.json"
+print()
+if _latest.exists():
+    print("마지막 checkpoint: %s" % _latest.read_text(encoding="utf-8").strip()[:300])
+else:
+    print("아직 checkpoint가 없습니다. save_every_steps 만큼 진행해야 첫 checkpoint가 생깁니다.")
+'''))
+
+    cells.append(md("""
+## 15. 학습이 끝난 뒤: fold 0을 다시 추론하고 평가합니다
+
+여기부터는 학습이 끝난 다음에 실행하는 셀입니다. 14번 절의 상태가 완료로 바뀌었는지 먼저
+확인하십시오. 15번 절부터 17번 절까지의 셀은 실행하기 전에 `post_train_ready` 로 학습 job이
+아직 살아 있는지와 `final_adapter` 가 만들어졌는지를 확인합니다. 둘 중 하나라도 충족되지
+않으면 안내만 출력하고 아무 일도 하지 않습니다. 그래서 메뉴의 "모두 실행"으로 노트북 전체를
+돌려도 학습과 추론이 GPU를 함께 쓰는 일이 생기지 않습니다. 학습이 끝난 뒤에 이 아래의 셀들을
+차례로 다시 실행하시면 됩니다.
+
+`--also-base` 를 붙이면 같은 forward에서 원본 모델의 확률도 함께 남습니다. 결합 후보를 비교할
+때 GPU 추론을 한 번 더 하지 않고 CPU에서만 계산할 수 있게 됩니다.
+"""))
+
+    cells.append(code(r'''
+if post_train_ready():
+    cmd = [PY, "-m", "vqa.predict",
+           "--config", CONFIG, "--run-id", FT_RUN,
+           "--csv", "train.csv", "--ids-file", VAL_IDS_FILE,
+           "--adapter", ADAPTER, "--out-name", VAL_OUT_FT] + ALSO_BASE_ARGS + OVERRIDES
+    gpu_step(FT_RUN + "_val", cmd, done=pred_done(FT_RUN, VAL_OUT_FT))
+'''))
+
+    cells.append(code(r'''
+if not pred_done(FT_RUN, VAL_OUT_FT):
+    print("학습된 모델의 fold 0 예측이 아직 끝나지 않아 평가를 건너뜁니다.")
+    print("바로 위 셀이 끝난 다음에 이 셀을 다시 실행하십시오.")
+else:
+    evaluate(pred_file(FT_RUN, VAL_OUT_FT), FT_RUN + "_" + VAL_OUT_FT,
+             "27B LoRA, 프롬프트 %s, 정밀도 %s" % (PROMPT_ID, PRECISION))
+'''))
+
+    cells.append(md("""
+## 16. 학습 전과 학습 후를 문항 단위로 비교합니다
+
+정확도 두 개를 나란히 놓고 보는 것만으로는 학습이 도움이 되었는지 판단할 수 없습니다. fold 0은
+1,344문항뿐이라서 0.5퍼센트포인트 정도의 차이는 표본 변동만으로도 생깁니다. 두 모델이 같은
+문항을 풀었으므로 짝지은 비교를 해야 하고, 그 자리에 맞는 검정이 McNemar 검정입니다.
+
+아래 셀은 한쪽만 맞힌 문항 수 두 개를 세서 양측 정확 이항 검정의 p값을 계산합니다. p값이
+0.05보다 크면 두 모델의 차이를 표본 변동과 구분할 수 없다는 뜻이므로, 정확도가 조금 올랐더라도
+학습이 도움이 되었다고 팀 채널에 보고하지 마십시오. 어떤 문항이 달라졌는지는
+`artifacts/eval/base_vs_ft_changed.csv` 에 저장됩니다.
+"""))
+
+    cells.append(code(r'''
+if not (pred_done(BASE_RUN, VAL_OUT_BASE) and pred_done(FT_RUN, VAL_OUT_FT)):
+    print("비교에 필요한 예측 두 개가 아직 모두 끝나지 않아 이 셀은 건너뜁니다.")
+    print("  원본 모델 fold 0 : %s" % ("완료" if pred_done(BASE_RUN, VAL_OUT_BASE) else "미완료"))
+    print("  학습 모델 fold 0 : %s" % ("완료" if pred_done(FT_RUN, VAL_OUT_FT) else "미완료"))
+else:
+    Path("artifacts/eval").mkdir(parents=True, exist_ok=True)
+    script("compare_predictions.py",
+           "--pred-a", str(pred_file(BASE_RUN, VAL_OUT_BASE)),
+           "--pred-b", str(pred_file(FT_RUN, VAL_OUT_FT)),
+           "--gold", str(DATA_ROOT_P / "train.csv"),
+           "--val-ids", VAL_IDS_FILE,
+           "--label-a", "base", "--label-b", "ft",
+           "--changed-out", "artifacts/eval/base_vs_ft_changed.csv",
+           "--json-out", "artifacts/eval/base_vs_ft.json",
+           check=False)
+'''))
+
+    cells.append(md("""
+## 17. 학습된 모델로 전체 test를 추론하고 제출 파일을 만듭니다
+
+16번 절에서 학습이 도움이 되었다고 판단한 경우에만 이 단계를 진행하십시오. 도움이 되지
+않았다면 12번 절에서 만든 원본 모델의 제출 파일이 더 나은 후보입니다.
+"""))
+
+    cells.append(code(r'''
+if post_train_ready():
+    cmd = [PY, "-m", "vqa.predict",
+           "--config", CONFIG, "--run-id", FT_RUN,
+           "--csv", "test.csv",
+           "--adapter", ADAPTER, "--out-name", TEST_OUT_FT] + ALSO_BASE_ARGS + OVERRIDES
+    gpu_step(FT_RUN + "_test", cmd, done=pred_done(FT_RUN, TEST_OUT_FT))
+'''))
+
+    cells.append(code(r'''
+if not pred_done(FT_RUN, TEST_OUT_FT):
+    print("학습된 모델의 test 예측이 아직 끝나지 않아 제출 파일을 만들지 않습니다.")
+    print("바로 위 셀이 끝난 다음에 이 셀을 다시 실행하십시오.")
+else:
+    make_submission(pred_file(FT_RUN, TEST_OUT_FT),
+                    "artifacts/submission/%s_ft.csv" % FT_RUN)
+'''))
+
+    cells.append(md("""
+## 18. 실행 상태를 팀에 공유합니다
+
+아래 출력을 팀 채널에 붙여 넣습니다. 다른 팀원은 실행 중인 런타임을 볼 수 없으므로, 이 기록이
+유일한 공유 수단입니다.
+"""))
+
+    cells.append(code(r'''
+JOB_NAMES = ["preflight_" + PRECISION,
+             BASE_RUN + "_val", BASE_RUN + "_test",
+             FT_RUN + "_train", FT_RUN + "_val", FT_RUN + "_test"]
+
+lines = ["===== Colab 27B 실행 상태 ====="]
+lines.append("시각      : %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
+lines.append("GPU       : %s / VRAM %.1fGB" % (GPU_NAME, VRAM_GB))
+lines.append("config    : %s" % CONFIG)
+lines.append("프롬프트  : %s" % PROMPT_ID)
+lines.append("코드 버전 : %s" % (CODE_VERSION or "(알 수 없음)"))
+for name in JOB_NAMES:
+    res = run([PY, "-m", "vqa.jobs", "status", "--name", name],
+              check=False, quiet=True, echo=False, hint=False)
+    first = res["output"].strip().splitlines()
+    lines.append("%-30s %s" % (name, first[0] if first else "기록 없음"))
+for run_id in (BASE_RUN, FT_RUN):
+    pred_dir = RUN_ROOT_P / run_id / "preds"
+    if pred_dir.is_dir():
+        for f in sorted(pred_dir.glob("*.csv")):
+            done = "완료" if Path(str(f) + ".manifest.json").exists() else "진행 중"
+            lines.append("예측 파일 : %s/%s (%d바이트, %s)" % (run_id, f.name, f.stat().st_size, done))
+lines.append("==============================")
+print("\n".join(lines))
+'''))
+
+    cells.append(md("""
+## 부록 A. 백그라운드 실행 확인 (D1에 한 번만)
+
+Pro+의 백그라운드 실행이 이 계정에서 실제로 어떻게 동작하는지 직접 확인하는 절차입니다.
+안내 문구만 믿고 밤샘 실행을 맡기면 안 되므로, 한 번은 직접 재 보아야 합니다. 본 실행 흐름과는
+분리되어 있으므로 필요할 때에만 실행하십시오.
 
 절차는 다음과 같습니다.
 
 1. 아래 셀을 실행해서 15분짜리 시험용 job을 띄웁니다. 이 job은 1분마다 Drive의 파일에 현재
    시각을 기록합니다.
-2. 브라우저 탭을 완전히 닫습니다. 노트북을 백그라운드로 두는 것이 아니라 탭을 닫아야 합니다.
+2. 브라우저 탭을 완전히 닫습니다. 창을 최소화하거나 다른 탭으로 옮기는 것이 아니라 탭 자체를
+   닫아야 합니다.
 3. 10분 정도 지난 뒤에 다시 접속합니다.
 4. 확인 셀을 실행해서 기록된 시각 사이에 빈 구간이 있는지 봅니다.
 
 판정 기준은 다음과 같습니다. 기록이 1분 간격으로 끊김 없이 이어지면 탭을 닫아도 실행이 유지되는
 것입니다. 탭을 닫은 시점부터 기록이 멈췄다가 다시 접속한 시점부터 다시 시작되면, 백그라운드
-실행이 동작하지 않는 것이므로 야간 실행 계획을 다시 세워야 합니다.
+실행이 동작하지 않는 것이므로 야간 실행 계획을 다시 세워야 합니다. 확인 결과는 팀 채널에 반드시
+공유하십시오.
+
+이 시험용 job은 GPU를 쓰지 않습니다. 다만 `vqa.jobs start` 는 같은 run-root에 살아 있는 job이
+있으면 시작을 거부하므로, 다른 작업이 없을 때 실행하십시오.
 """))
 
     cells.append(code(r'''
@@ -2612,7 +3389,8 @@ SCRIPT_PATH.write_text(
 if HEARTBEAT_FILE.exists():
     HEARTBEAT_FILE.unlink()
 
-job_start("bg_test", [PY, str(SCRIPT_PATH), str(HEARTBEAT_FILE)], extra=False)
+gpu_step("bg_test", [PY, str(SCRIPT_PATH), str(HEARTBEAT_FILE)],
+         wait=False, min_free_gb=0)
 print()
 print("지금부터 브라우저 탭을 닫고 10분쯤 뒤에 다시 접속하십시오.")
 print("기록 파일:", HEARTBEAT_FILE)
@@ -2641,188 +3419,7 @@ else:
         print("판정: 끊긴 구간이 있습니다. 백그라운드 실행을 믿지 말고,")
         print("      checkpoint 간격을 짧게 잡고 재개 절차를 자주 확인해야 합니다.")
 '''))
-
-    cells.append(md("""
-## 2. base validation 추론
-
-학습 전 27B로 고정 validation을 추론합니다. 결합 가중치를 고를 때 쓰는 기준 확률이므로 반드시
-먼저 확보해야 합니다. 진행 상황을 보려면 `python -m vqa.jobs tail --name <job 이름> --lines 20`
-을 실행하십시오. Drive에서 모델을 불러오는 데 수 분이 걸리므로 첫 진행 로그가 나오기까지 시간이
-걸릴 수 있습니다.
-"""))
-
-    cells.append(code(r'''
-cmd = [PY, "-m", "vqa.predict",
-       "--config", CONFIG, "--run-id", BASE_RUN_ID,
-       "--csv", "train.csv", "--ids-file", VAL_IDS_FILE,
-       "--adapter", "none", "--out-name", VAL_OUT_BASE] + OVERRIDES
-job_start(BASE_RUN_ID + "_val", cmd)
-'''))
-
-    cells.append(md("""
-## 3. base 전체 test 추론
-
-첫 유효 제출과 확률 캐시를 확보하는 단계입니다. 이 작업이 끝나야 수정이 제출을 준비할 수
-있습니다. 같은 GPU에서 학습과 동시에 돌리지 말고 순서대로 실행하십시오.
-"""))
-
-    cells.append(code(r'''
-cmd = [PY, "-m", "vqa.predict",
-       "--config", CONFIG, "--run-id", BASE_RUN_ID,
-       "--csv", "test.csv",
-       "--adapter", "none", "--out-name", "test_base"] + OVERRIDES
-job_start(BASE_RUN_ID + "_test", cmd)
-'''))
-
-    cells.append(md("""
-## 4. base 제출 파일 만들기
-
-전체 test 추론이 끝난 뒤에 실행합니다. 검사기를 통과하면 수정에게 파일과 해시를 넘깁니다.
-"""))
-
-    cells.append(code(r'''
-PRED = RUN_ROOT_P / BASE_RUN_ID / "preds" / "test_base.csv"
-SUB = "artifacts/submission/%s_base.csv" % BASE_RUN_ID
-Path("artifacts/submission").mkdir(parents=True, exist_ok=True)
-
-if not PRED.exists():
-    print("아직 추론이 끝나지 않았습니다:", PRED)
-else:
-    vqa("submit", "--pred", str(PRED),
-        "--sample", str(Path(os.environ["VQA_DATA_ROOT"]) / "sample_submission.csv"),
-        "--out", SUB)
-    script("check_submission.py", "--submission", SUB,
-           "--sample", str(Path(os.environ["VQA_DATA_ROOT"]) / "sample_submission.csv"))
-    print()
-    print("제출 후보: %s" % SUB)
-    print("sha256   : %s" % sha256_of(SUB))
-'''))
-
-    cells.append(md("""
-## 5. 학습
-
-`--resume auto` 가 기본이므로 이 셀을 여러 번 실행해도 안전합니다. 가상 머신이 회수된 뒤에도
-같은 셀을 그대로 다시 실행하면 Drive의 checkpoint에서 이어집니다.
-
-아래 셀은 시작하기 전에 두 가지를 확인합니다. 첫째로 지금 GPU가 정책이 요구하는 정밀도를
-감당하는지 보고, 둘째로 이 run이 이미 다른 정밀도로 시작된 적이 있는지를 `run_manifest.json`
-에서 확인합니다. 정밀도가 다르면 학습을 시작하지 않고 멈춥니다. 같은 run-id 아래에 bf16
-checkpoint와 nf4 checkpoint가 섞이면 이어서 하는 실행을 믿을 수 없게 되기 때문입니다.
-"""))
-
-    cells.append(code(r'''
-if not TRAINING_ALLOWED:
-    raise RuntimeError(
-        "현재 GPU의 VRAM이 %.1fGB이므로 bf16 학습을 시작하거나 이어서 할 수 없습니다. "
-        "런타임을 끊고 80GB A100으로 다시 연결한 다음 이 셀을 실행하십시오. "
-        "지금 이 가상 머신에서는 추론만 nf4로 돌릴 수 있습니다." % VRAM_GB
-    )
-
-# 이미 시작한 run이라면 그때 쓴 정밀도와 지금 정밀도가 같아야 합니다.
-_manifest_path = RUN_ROOT_P / FT_RUN_ID / "run_manifest.json"
-if _manifest_path.exists():
-    _manifest = json.loads(_manifest_path.read_text(encoding="utf-8"))
-    _prev = str(_manifest.get("config", {}).get("precision", "")).lower()
-    if _prev and _prev != PRECISION:
-        raise RuntimeError(
-            "run %s 은 %s 로 시작했는데 지금 설정은 %s 입니다. 정밀도가 다른 채로 이어서 하면 "
-            "checkpoint가 섞입니다. 같은 정밀도의 GPU로 다시 연결하거나, 다른 run-id를 쓰십시오.\n"
-            "기록 파일: %s" % (FT_RUN_ID, _prev, PRECISION, _manifest_path)
-        )
-    print("run %s 의 기존 정밀도 %s 와 현재 정밀도가 같습니다. 이어서 진행합니다." % (FT_RUN_ID, _prev))
-
-cmd = [PY, "-m", "vqa.train",
-       "--config", CONFIG, "--run-id", FT_RUN_ID,
-       "--split", SPLIT_FILE, "--resume", "auto"] + OVERRIDES
-job_start(FT_RUN_ID + "_train", cmd)
-'''))
-
-    cells.append(md("""
-## 6. FT validation과 전체 test 추론
-
-`--also-base` 를 붙이면 같은 실행에서 base 확률도 함께 남깁니다. 결합 후보를 비교할 때 추가
-GPU 추론 없이 CPU에서만 계산할 수 있게 됩니다.
-"""))
-
-    cells.append(code(r'''
-ADAPTER = str(RUN_ROOT_P / FT_RUN_ID / "final_adapter")
-
-cmd = [PY, "-m", "vqa.predict",
-       "--config", CONFIG, "--run-id", FT_RUN_ID,
-       "--csv", "train.csv", "--ids-file", VAL_IDS_FILE,
-       "--adapter", ADAPTER, "--out-name", VAL_OUT_FT] + ALSO_BASE_ARGS + OVERRIDES
-job_start(FT_RUN_ID + "_val", cmd)
-'''))
-
-    cells.append(code(r'''
-cmd = [PY, "-m", "vqa.predict",
-       "--config", CONFIG, "--run-id", FT_RUN_ID,
-       "--csv", "test.csv",
-       "--adapter", ADAPTER, "--out-name", "test_ft"] + ALSO_BASE_ARGS + OVERRIDES
-job_start(FT_RUN_ID + "_test", cmd)
-'''))
-
-    cells.append(md("""
-## 7. 감시
-
-이 셀은 일정 시간 동안 상태와 마지막 checkpoint를 반복해서 출력합니다. 탭을 열어 둔 동안
-세션이 유휴 상태로 판정되지 않게 하는 효과도 있습니다. 다만 이것이 백그라운드 실행을 대신하지는
-않습니다. 탭을 닫아야 할 때는 1번 절의 확인 결과에 따라 판단하십시오.
-
-감시할 job 이름을 `WATCH` 에 적고 실행하십시오.
-"""))
-
-    cells.append(code(r'''
-from IPython.display import clear_output
-
-WATCH = FT_RUN_ID + "_train"
-
-deadline = time.time() + MONITOR_MINUTES * 60
-while time.time() < deadline:
-    clear_output(wait=True)
-    print("감시 중: %s  (%s)" % (WATCH, time.strftime("%H:%M:%S")))
-    print("남은 감시 시간: %.1f분" % ((deadline - time.time()) / 60.0))
-    print("=" * 60)
-    job_status(WATCH)
-    for run_id in (BASE_RUN_ID, FT_RUN_ID):
-        latest = RUN_ROOT_P / run_id / "checkpoints" / "latest.json"
-        if latest.exists():
-            print("[%s] latest: %s" % (run_id, latest.read_text(encoding="utf-8")[:200]))
-        hb = RUN_ROOT_P / run_id / "heartbeat.json"
-        if hb.exists():
-            print("[%s] heartbeat: %s" % (run_id, hb.read_text(encoding="utf-8")[:200]))
-    sys.stdout.flush()
-    time.sleep(MONITOR_INTERVAL_SEC)
-
-print("감시를 마쳤습니다. job은 계속 돌아갑니다.")
-'''))
-
-    cells.append(md("""
-## 8. 실행 상태 공유
-
-아래 출력을 팀 채널에 붙여 넣습니다. 다른 팀원은 실행 중인 런타임을 볼 수 없으므로, 이 기록이
-유일한 공유 수단입니다.
-"""))
-
-    cells.append(code(r'''
-lines = ["===== Colab 27B 실행 상태 ====="]
-lines.append("시각    : %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
-lines.append("config  : %s" % CONFIG)
-for name in JOB_NAMES:
-    res = run([PY, "-m", "vqa.jobs", "status", "--name", name],
-              check=False, quiet=True, echo=False, hint=False)
-    first = res["output"].strip().splitlines()
-    lines.append("%-24s %s" % (name, first[0] if first else "기록 없음"))
-for run_id in (BASE_RUN_ID, FT_RUN_ID):
-    pred_dir = RUN_ROOT_P / run_id / "preds"
-    if pred_dir.is_dir():
-        for f in sorted(pred_dir.glob("*.csv")):
-            lines.append("예측 파일: %s (%d바이트)" % (f.name, f.stat().st_size))
-lines.append("==============================")
-print("\n".join(lines))
-'''))
     return notebook(cells)
-
 
 # --------------------------------------------------------------------------
 # 30_eval_submit

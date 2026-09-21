@@ -144,6 +144,30 @@ def _auto_classes() -> list[tuple[str, Any]]:
     return out
 
 
+#: OOM일 때 붙이는 안내. Auto 클래스를 바꿔 봐야 결과가 같으므로 곧바로 멈춘다.
+OOM_GUIDE = (
+    "GPU 여유 메모리가 부족합니다. 다른 프로세스가 GPU를 점유하고 있는지 "
+    "`nvidia-smi`와 `python -m vqa.jobs list`로 확인하세요."
+)
+
+
+def is_oom_error(exc: BaseException) -> bool:
+    """CUDA 메모리 부족 예외인지. torch가 없는 환경에서는 메시지만으로 판별한다."""
+    try:
+        import torch
+
+        candidates = (
+            getattr(torch.cuda, "OutOfMemoryError", None),
+            getattr(torch, "OutOfMemoryError", None),
+        )
+        oom_types = tuple(cls for cls in candidates if isinstance(cls, type))
+        if oom_types and isinstance(exc, oom_types):
+            return True
+    except Exception:
+        pass
+    return "out of memory" in str(exc).lower()
+
+
 def quantization_config(precision: str) -> Any | None:
     """precision 문자열에 맞는 BitsAndBytesConfig. bf16이면 None."""
     precision = precision.lower()
@@ -193,6 +217,9 @@ def load_base_model(cfg: dict[str, Any], *, source: str | None = None, for_train
         try:
             model = cls.from_pretrained(src, **kwargs)
         except Exception as exc:  # 클래스별 미지원은 다음 후보로 넘어간다
+            if is_oom_error(exc):
+                # 메모리가 모자란 것은 Auto 클래스 문제가 아니다. 다음 후보도 똑같이 실패한다.
+                raise ModelLoadError(f"{OOM_GUIDE}\n{name}: {type(exc).__name__}: {exc}") from exc
             errors.append(f"{name}: {type(exc).__name__}: {exc}")
             continue
         prepare_for_training(model, precision, enable=for_training)

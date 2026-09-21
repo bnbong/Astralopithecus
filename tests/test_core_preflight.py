@@ -284,3 +284,247 @@ def test_inference_splits_prepare_and_compute_time():
     text = preflight_mod.timing_summary([result])
     assert "초/문항 (CPU 배치 준비)" in text
     assert "초/문항 (GPU scoring forward)" in text
+
+
+# --------------------------------------------------------------------------
+# kernel_fast_path: 가속 커널 경로 판정
+# --------------------------------------------------------------------------
+
+GATED_DELTA_WARNING = (
+    "`chunk_gated_delta_rule` is falling back to its reference PyTorch implementation "
+    "because the fla package is not installed."
+)
+CAUSAL_CONV_WARNING = (
+    "`causal_conv1d` is falling back to its reference PyTorch implementation "
+    "because causal-conv1d is not installed."
+)
+
+
+def test_kernel_fast_path_warns_when_gated_delta_falls_back():
+    result = preflight_mod.check_kernel_fast_path([GATED_DELTA_WARNING])
+    assert result.status == preflight_mod.WARN
+    assert "2배" in result.reason
+    assert "--no-deps" in result.reason
+    assert result.detail["gated_delta"] == [GATED_DELTA_WARNING]
+    assert result.detail["causal_conv"] == []
+
+
+def test_kernel_fast_path_treats_causal_conv_only_as_information():
+    result = preflight_mod.check_kernel_fast_path([CAUSAL_CONV_WARNING])
+    assert result.status == preflight_mod.PASS
+    assert "causal-conv1d" in result.reason
+    assert result.detail["causal_conv"] == [CAUSAL_CONV_WARNING]
+
+
+def test_kernel_fast_path_passes_without_any_warning():
+    result = preflight_mod.check_kernel_fast_path([])
+    assert result.status == preflight_mod.PASS
+    assert result.detail["messages"] == []
+
+
+def test_kernel_fast_path_is_skipped_without_a_model():
+    result = preflight_mod.check_kernel_fast_path([], model_loaded=False)
+    assert result.status == preflight_mod.SKIP
+
+
+def test_kernel_fast_path_warns_even_when_other_warnings_are_mixed_in():
+    messages = ["Falling back to eager attention.", GATED_DELTA_WARNING, CAUSAL_CONV_WARNING]
+    result = preflight_mod.check_kernel_fast_path(messages)
+    assert result.status == preflight_mod.WARN
+    assert result.detail["other"] == ["Falling back to eager attention."]
+
+
+def test_kernel_fast_path_warning_does_not_fail_the_preflight():
+    """WARN은 종료 코드를 바꾸지 않는다. 학습 자체는 가능하기 때문이다."""
+    flight = preflight_mod.Preflight()
+    flight.run("kernel_fast_path", lambda: preflight_mod.check_kernel_fast_path([GATED_DELTA_WARNING]))
+    assert flight.failed == []
+
+
+# --------------------------------------------------------------------------
+# pixel_limits: min/max_pixels가 processor에 실제로 먹었는지 확인
+# --------------------------------------------------------------------------
+
+PATCH_SIZE = 16
+MERGE_SIZE = 2
+PIXELS_PER_TOKEN = (PATCH_SIZE * MERGE_SIZE) ** 2  # 1024
+
+
+class FakeImageProcessor:
+    """min/max_pixels를 적용할지 말지를 골라서 흉내내는 가짜 image_processor다."""
+
+    def __init__(self, min_pixels, max_pixels, *, enforce=True,
+                 patch_size=PATCH_SIZE, merge_size=MERGE_SIZE):
+        self.min_pixels = min_pixels
+        self.max_pixels = max_pixels
+        self.enforce = enforce
+        self.patch_size = patch_size
+        self.merge_size = merge_size
+
+    def __call__(self, images, return_tensors=None):  # noqa: ARG002
+        grids = []
+        for image in images:
+            width, height = image.size
+            pixels = width * height
+            if self.enforce:
+                pixels = min(max(pixels, self.min_pixels), self.max_pixels)
+            tokens = max(int(pixels // PIXELS_PER_TOKEN), 1)
+            # [t, h, w]를 patch 단위로 돌려준다. merge로 나누면 tokens가 된다.
+            grids.append([1, tokens * self.merge_size, self.merge_size])
+        return {"image_grid_thw": grids}
+
+
+class FakeProcessor:
+    def __init__(self, image_processor):
+        self.image_processor = image_processor
+
+
+def make_pixel_fixture(tmp_path, sizes):
+    """지정한 크기의 이미지를 만들고 (records, data_root)를 돌려준다."""
+    from PIL import Image
+
+    (tmp_path / "train").mkdir(parents=True, exist_ok=True)
+    records = []
+    for index, (width, height) in enumerate(sizes, start=1):
+        name = "train_%04d.jpg" % index
+        Image.new("RGB", (width, height), (128, 128, 128)).save(tmp_path / "train" / name)
+        records.append(
+            VQARecord(
+                id=name,
+                path="train/" + name,
+                question="질문",
+                options=["가", "나", "다", "라"],
+                answer_idx=0,
+            )
+        )
+    return records, tmp_path
+
+
+PIXEL_CFG = {"min_pixels": 262144, "max_pixels": 1048576}
+
+
+def test_pixel_limits_passes_when_the_processor_applies_the_budget(tmp_path):
+    records, data_root = make_pixel_fixture(tmp_path, [(2048, 1536), (320, 240)])
+    processor = FakeProcessor(FakeImageProcessor(262144, 1048576, enforce=True))
+    result = preflight_mod.check_pixel_limits(processor, PIXEL_CFG, records, data_root)
+    assert result.status == preflight_mod.PASS
+    detail = result.detail
+    assert detail["largest"]["width"] == 2048 and detail["largest"]["height"] == 1536
+    assert detail["smallest"]["width"] == 320 and detail["smallest"]["height"] == 240
+    assert detail["expected_tokens_upper"] == 1024.0
+    assert detail["largest"]["visual_tokens"] <= 1024
+    assert detail["upper_binding"] is True
+    assert "시각 토큰" in result.reason
+
+
+def test_pixel_limits_fails_when_max_pixels_is_ignored(tmp_path):
+    records, data_root = make_pixel_fixture(tmp_path, [(4000, 3000), (320, 240)])
+    processor = FakeProcessor(FakeImageProcessor(262144, 1048576, enforce=False))
+    result = preflight_mod.check_pixel_limits(processor, PIXEL_CFG, records, data_root)
+    assert result.status == preflight_mod.FAIL
+    assert "max_pixels" in result.reason
+    assert result.detail["largest"]["visual_tokens"] > result.detail["expected_tokens_upper"]
+
+
+def test_pixel_limits_fails_when_min_pixels_is_ignored(tmp_path):
+    # 가장 큰 이미지는 상한 안에 들어오고, 가장 작은 이미지만 하한에 못 미치게 만든다.
+    records, data_root = make_pixel_fixture(tmp_path, [(1024, 1024), (64, 64)])
+    processor = FakeProcessor(FakeImageProcessor(262144, 1048576, enforce=False))
+    result = preflight_mod.check_pixel_limits(processor, PIXEL_CFG, records, data_root)
+    assert result.status == preflight_mod.FAIL
+    assert "min_pixels" in result.reason
+    assert result.detail["lower_binding"] is True
+
+
+def test_pixel_limits_warns_when_no_image_reaches_the_upper_bound(tmp_path):
+    records, data_root = make_pixel_fixture(tmp_path, [(800, 600), (640, 480)])
+    processor = FakeProcessor(FakeImageProcessor(262144, 1048576, enforce=True))
+    result = preflight_mod.check_pixel_limits(processor, PIXEL_CFG, records, data_root)
+    assert result.status == preflight_mod.WARN
+    assert result.detail["upper_binding"] is False
+    assert "확인하지 못했습니다" in result.reason
+
+
+def test_pixel_limits_warns_without_patch_or_merge_size(tmp_path):
+    records, data_root = make_pixel_fixture(tmp_path, [(2048, 1536)])
+    processor = FakeProcessor(FakeImageProcessor(262144, 1048576, patch_size=None, merge_size=None))
+    result = preflight_mod.check_pixel_limits(processor, PIXEL_CFG, records, data_root)
+    assert result.status == preflight_mod.WARN
+    assert "patch_size" in result.reason
+
+
+def test_pixel_limits_reads_patch_and_merge_size_from_the_processor(tmp_path):
+    """patch/merge 크기를 하드코딩하지 않고 image_processor에서 읽는다."""
+    records, data_root = make_pixel_fixture(tmp_path, [(2048, 1536), (320, 240)])
+    processor = FakeProcessor(
+        FakeImageProcessor(262144, 1048576, enforce=True, patch_size=14, merge_size=2)
+    )
+    result = preflight_mod.check_pixel_limits(processor, PIXEL_CFG, records, data_root)
+    assert result.detail["patch_size"] == 14
+    assert result.detail["merge_size"] == 2
+    assert result.detail["pixels_per_token"] == (14 * 2) ** 2
+    assert result.detail["expected_tokens_upper"] == 1048576 / ((14 * 2) ** 2)
+
+
+def test_pixel_limits_skips_without_an_image_processor(tmp_path):
+    records, data_root = make_pixel_fixture(tmp_path, [(800, 600)])
+
+    class Bare:
+        pass
+
+    result = preflight_mod.check_pixel_limits(Bare(), PIXEL_CFG, records, data_root)
+    assert result.status == preflight_mod.SKIP
+
+
+def test_pixel_limits_warns_without_image_grid_thw(tmp_path):
+    records, data_root = make_pixel_fixture(tmp_path, [(2048, 1536)])
+
+    class NoGrid(FakeImageProcessor):
+        def __call__(self, images, return_tensors=None):  # noqa: ARG002
+            return {"pixel_values": [0]}
+
+    result = preflight_mod.check_pixel_limits(
+        FakeProcessor(NoGrid(262144, 1048576)), PIXEL_CFG, records, data_root
+    )
+    assert result.status == preflight_mod.WARN
+    assert "image_grid_thw" in result.reason
+
+
+def test_pixel_limits_accepts_a_processor_without_the_images_keyword(tmp_path):
+    """transformers 버전에 따라 호출 형태가 달라도 검사가 그대로 동작해야 한다."""
+    records, data_root = make_pixel_fixture(tmp_path, [(2048, 1536), (320, 240)])
+
+    class PositionalOnly(FakeImageProcessor):
+        def __call__(self, images, return_tensors=None):  # noqa: ARG002
+            if return_tensors is not None:
+                raise TypeError("return_tensors를 받지 않습니다.")
+            return FakeImageProcessor.__call__(self, images)
+
+    result = preflight_mod.check_pixel_limits(
+        FakeProcessor(PositionalOnly(262144, 1048576, enforce=True)), PIXEL_CFG, records, data_root
+    )
+    assert result.status == preflight_mod.PASS
+
+
+def test_pixel_limits_warns_when_the_processor_cannot_be_called(tmp_path):
+    """호출 자체가 막히면 해상도가 틀렸다는 뜻이 아니므로 FAIL이 아니라 WARN이어야 한다."""
+    records, data_root = make_pixel_fixture(tmp_path, [(2048, 1536), (320, 240)])
+
+    class Broken(FakeImageProcessor):
+        def __call__(self, *args, **kwargs):  # noqa: ARG002
+            raise TypeError("이 버전은 다른 인자를 받습니다.")
+
+    result = preflight_mod.check_pixel_limits(
+        FakeProcessor(Broken(262144, 1048576)), PIXEL_CFG, records, data_root
+    )
+    assert result.status == preflight_mod.WARN
+    assert "확인하지 못했습니다" in result.reason
+    assert "TypeError" in result.detail["probe_errors"]
+
+
+def test_pixel_limits_cli_sample_flag():
+    parser = preflight_mod.build_parser()
+    args = parser.parse_args(["--config", "configs/lab_qwen35_9b.yaml"])
+    assert args.pixel_sample == preflight_mod.DEFAULT_PIXEL_SAMPLE
+    args = parser.parse_args(["--config", "configs/lab_qwen35_9b.yaml", "--pixel-sample", "10"])
+    assert args.pixel_sample == 10

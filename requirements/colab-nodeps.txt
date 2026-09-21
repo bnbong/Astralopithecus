@@ -1,0 +1,36 @@
+# Colab Pro+ / A100 / Qwen3.5-27B — 반드시 --no-deps로 설치하는 패키지
+#
+#   pip install -q --no-deps -r requirements/colab-nodeps.txt
+#
+# 왜 파일을 나누는가
+#   requirements 파일 한 줄에는 --no-deps를 적을 수 없다. 그런데 아래 패키지들은 자기
+#   의존성으로 torch와 triton을 다시 끌어온다. 그대로 두면 Colab 기본 이미지의 torch
+#   2.11.0+cu128이 다른 빌드로 바뀌어서, 이미 통과해 둔 bf16 경로가 통째로 무너진다.
+#   그래서 이 파일만 --no-deps로 따로 설치하고, 설치 전후의 torch 버전이 같은지 노트북의
+#   환경 확인 셀이 별도 프로세스에서 다시 확인한다.
+#
+# 무엇을 해결하는가
+#   transformers의 Qwen3.5 Gated DeltaNet은 fla 패키지가 있으면 그 커널을 쓰고, 없으면
+#   PyTorch 참조 구현으로 내려간다. 내려갈 때 다음 경고를 남긴다.
+#     `chunk_gated_delta_rule` is falling back to its reference PyTorch implementation
+#     because ... is not installed
+#   2026-09-21 Colab A100 bf16 학습이 step당 58초(microbatch당 7.3초)로, 참고 실행의
+#   3.37초보다 두 배 이상 느렸던 원인이 이 fallback이다. 아래 두 패키지를 설치하면 가속
+#   커널 경로로 돌아온다.
+#
+# 설치에 실패해도 학습 자체는 가능하다. 다만 약 두 배 느려진다. 그래서 노트북의 환경 셀은
+# 이 단계가 실패해도 멈추지 않고 경고만 크게 출력한다. `python -m vqa.preflight`의
+# kernel_fast_path 검사가 같은 내용을 WARN으로 다시 알려 준다.
+#
+# 버전은 아직 Colab에서 확인하지 못했다. 한 번 설치한 뒤 `pip show fla-core
+# flash-linear-attention`으로 실제 버전을 확인하고, 그 값으로 여기를 고정한다.
+# einops는 --no-deps 대상이 아니므로 requirements/colab.txt에 있다.
+
+fla-core
+flash-linear-attention
+
+# causal-conv1d는 선택 사항이다. wheel이 없어서 소스 빌드가 필요하고, Colab에서 빌드하면
+# 몇 분이 걸리는 데다 실패하기도 쉽다. 이 패키지가 없을 때 생기는 fallback은 Gated
+# DeltaNet 경로가 아니라 short convolution 경로이며, 속도에 주는 영향이 훨씬 작다.
+# 굳이 시도하려면 아래를 직접 실행한다. requirements에는 넣지 않는다.
+#   pip install --no-build-isolation causal-conv1d

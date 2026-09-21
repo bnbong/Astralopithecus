@@ -8,7 +8,12 @@
 # 노트북 20번과 21번의 "환경 설치와 확인" 셀이 다음 순서로 이 파일을 쓴다.
 #   1) pip uninstall -y torchao
 #   2) pip install -q -r requirements/colab.txt
-#   3) 별도 프로세스에서 import 점검
+#   3) pip install -q --no-deps -r requirements/colab-nodeps.txt   (실패해도 멈추지 않는다)
+#   4) 별도 프로세스에서 import 점검 + torch 버전이 3)의 앞뒤로 바뀌지 않았는지 확인
+#
+# 3)을 --no-deps로 따로 두는 이유는 fla 계열 패키지가 자기 의존성으로 torch와 triton을
+# 다시 끌어오기 때문이다. requirements 파일 한 줄로는 --no-deps를 표현할 수 없어서 파일을
+# 나눈다. 자세한 설명은 requirements/colab-nodeps.txt에 적어 두었다.
 #
 # 노트북마다 가상 머신이 따로 배정되므로, 새 노트북을 열 때마다 이 설치를 다시 해야 한다.
 
@@ -28,6 +33,11 @@ pandas==2.2.3
 pillow
 pyyaml
 tqdm
+
+# einops는 fla 커널이 import 시점에 바로 쓴다. fla 계열은 --no-deps로 설치하므로 einops를
+# 여기에서 따로 받아 둔다. 의존성이 가벼워서 torch를 건드리지 않는다.
+# 버전은 아직 Colab에서 확인하지 못했다. `pip show einops`로 확인한 뒤 고정한다.
+einops
 
 pytest
 

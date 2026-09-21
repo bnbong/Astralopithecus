@@ -180,6 +180,226 @@ def check_choice_tokens(processor: Any, spec: prompt_mod.PromptSpec, image: Any)
     return CheckResult("choice_token_after_tail", PASS, f"scoring token ids={tokens.ids}", detail)
 
 
+#: processor가 min/max_pixels를 실제로 적용했는지 볼 때 허용하는 상대 오차.
+#: smart_resize가 patch 배수로 올림하거나 내림하므로 정확히 경계에 붙지 않는다.
+PIXEL_LIMIT_TOLERANCE = 0.02
+
+#: 크기 표본을 훑을 때 기본으로 열어 보는 이미지 개수.
+DEFAULT_PIXEL_SAMPLE = 200
+
+
+def _visual_tokens_from_grid(grid: Any, merge_size: int) -> int | None:
+    """image_grid_thw 한 행에서 merge 뒤의 시각 토큰 수를 계산한다.
+
+    grid는 [t, h, w]를 patch 단위로 담고 있다. merge_size는 가로와 세로를 각각
+    merge_size배로 묶으므로 토큰 수는 t*h*w를 merge_size의 제곱으로 나눈 값이다.
+    """
+    try:
+        values = [int(x) for x in list(grid)]
+    except Exception:
+        return None
+    if not values:
+        return None
+    product = 1
+    for value in values:
+        product *= value
+    divisor = max(int(merge_size), 1) ** 2
+    return product // divisor
+
+
+class ImageProbeError(RuntimeError):
+    """image_processor를 어떤 호출 형태로도 부르지 못했을 때 쓴다."""
+
+
+def _call_image_processor(image_processor: Any, image: Any) -> Any:
+    """버전마다 다른 호출 형태를 차례로 시도한다.
+
+    transformers 버전에 따라 image_processor가 받는 인자 이름이 달라진다. 어느 형태로도
+    부르지 못하면 ImageProbeError를 올려서, 검사 자체를 FAIL이 아니라 WARN으로 떨어뜨린다.
+    해상도 설정이 틀렸다는 뜻이 아니라 확인하지 못했다는 뜻이기 때문이다.
+    """
+    attempts = (
+        lambda: image_processor(images=[image], return_tensors="pt"),
+        lambda: image_processor(images=[image]),
+        lambda: image_processor([image], return_tensors="pt"),
+    )
+    errors: list[str] = []
+    for attempt in attempts:
+        try:
+            return attempt()
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+    raise ImageProbeError("; ".join(errors))
+
+
+def _probe_image(image_processor: Any, image: Any, merge_size: int) -> tuple[int | None, list[str]]:
+    """이미지 한 장을 실제로 전처리해서 시각 토큰 수를 구한다."""
+    encoded = _call_image_processor(image_processor, image)
+    keys = sorted(encoded.keys()) if hasattr(encoded, "keys") else []
+    grid = encoded.get("image_grid_thw") if hasattr(encoded, "get") else None
+    if grid is None:
+        return None, keys
+    row = grid[0] if len(grid) else grid
+    return _visual_tokens_from_grid(row, merge_size), keys
+
+
+def check_pixel_limits(
+    processor: Any,
+    cfg: dict[str, Any],
+    records: Sequence[collator_mod.VQARecord],
+    data_root: Path,
+    *,
+    sample: int = DEFAULT_PIXEL_SAMPLE,
+) -> CheckResult:
+    """설정한 min/max_pixels가 processor에 실제로 먹었는지 이미지로 직접 확인한다.
+
+    모델은 필요 없다. 표본 중에서 가장 큰 이미지와 가장 작은 이미지를 골라 image_processor에
+    그대로 넣고, image_grid_thw에서 시각 토큰 수를 센 다음, 설정값에서 기대되는 범위와
+    비교한다. patch 크기와 merge 크기는 하드코딩하지 않고 image_processor 속성에서 읽는다.
+    """
+    min_pixels = config_mod.get_path(cfg, "min_pixels")
+    max_pixels = config_mod.get_path(cfg, "max_pixels")
+    if not min_pixels or not max_pixels:
+        return CheckResult("pixel_limits", SKIP, "config에 min_pixels 또는 max_pixels가 없습니다.")
+    min_pixels = int(min_pixels)
+    max_pixels = int(max_pixels)
+
+    image_processor = getattr(processor, "image_processor", None)
+    if image_processor is None:
+        return CheckResult(
+            "pixel_limits", SKIP, "processor에 image_processor가 없어서 확인할 수 없습니다."
+        )
+
+    patch_size = getattr(image_processor, "patch_size", None)
+    merge_size = getattr(image_processor, "merge_size", None)
+    if not patch_size or not merge_size:
+        return CheckResult(
+            "pixel_limits",
+            WARN,
+            "image_processor에서 patch_size 또는 merge_size를 읽지 못해 기대 범위를 세울 수 없습니다.",
+            {"patch_size": patch_size, "merge_size": merge_size},
+        )
+    patch_size = int(patch_size)
+    merge_size = int(merge_size)
+
+    # 시각 토큰 하나가 덮는 원본 픽셀 넓이다. patch를 merge_size배로 묶기 때문이다.
+    pixels_per_token = (patch_size * merge_size) ** 2
+    tokens_upper = max_pixels / pixels_per_token
+    tokens_lower = min_pixels / pixels_per_token
+
+    # 이미지를 디코딩하지 않고 크기만 읽어서 가장 큰 것과 가장 작은 것을 고른다.
+    from PIL import Image
+
+    largest = None
+    smallest = None
+    scanned = 0
+    for record in records[: max(int(sample), 1)]:
+        path = collator_mod.resolve_image_path(record.path, data_root)
+        if not path.exists():
+            continue
+        try:
+            with Image.open(path) as handle:
+                width, height = handle.size
+        except Exception:
+            continue
+        scanned += 1
+        entry = {"id": record.id, "path": record.path, "width": width, "height": height,
+                 "pixels": width * height}
+        if largest is None or entry["pixels"] > largest["pixels"]:
+            largest = entry
+        if smallest is None or entry["pixels"] < smallest["pixels"]:
+            smallest = entry
+
+    if largest is None or smallest is None:
+        return CheckResult("pixel_limits", SKIP, "열어 볼 수 있는 이미지를 찾지 못했습니다.")
+
+    detail: dict[str, Any] = {
+        "min_pixels": min_pixels,
+        "max_pixels": max_pixels,
+        "patch_size": patch_size,
+        "merge_size": merge_size,
+        "pixels_per_token": pixels_per_token,
+        "expected_tokens_upper": tokens_upper,
+        "expected_tokens_lower": tokens_lower,
+        "scanned_images": scanned,
+        "largest": dict(largest),
+        "smallest": dict(smallest),
+    }
+    # 이후에는 detail 안의 사본을 그대로 채워 나간다.
+    largest = detail["largest"]
+    smallest = detail["smallest"]
+
+    for label, entry in (("largest", largest), ("smallest", smallest)):
+        image = collator_mod.load_image(entry["path"], data_root)
+        try:
+            tokens, keys = _probe_image(image_processor, image, merge_size)
+        except ImageProbeError as exc:
+            detail["probe_errors"] = str(exc)
+            return CheckResult(
+                "pixel_limits",
+                WARN,
+                "image_processor를 직접 호출하지 못해 해상도 적용 여부를 확인하지 못했습니다. "
+                "자세한 내용은 detail의 probe_errors에 있습니다.",
+                detail,
+            )
+        if tokens is None:
+            detail["encoded_keys"] = keys
+            return CheckResult(
+                "pixel_limits",
+                WARN,
+                "image_processor 결과에 image_grid_thw가 없어서 시각 토큰 수를 셀 수 없습니다.",
+                detail,
+            )
+        detail[label]["visual_tokens"] = tokens
+
+    # 원본이 상한(하한)에 걸릴 만큼 크지(작지) 않으면 그 방향은 시험한 것이 아니다.
+    upper_binding = largest["pixels"] > max_pixels
+    lower_binding = smallest["pixels"] < min_pixels
+    detail["upper_binding"] = upper_binding
+    detail["lower_binding"] = lower_binding
+
+    upper_allowed = tokens_upper * (1.0 + PIXEL_LIMIT_TOLERANCE) + 1
+    lower_allowed = tokens_lower * (1.0 - PIXEL_LIMIT_TOLERANCE) - 1
+
+    if largest["visual_tokens"] > upper_allowed:
+        return CheckResult(
+            "pixel_limits",
+            FAIL,
+            "가장 큰 이미지 %s 가 시각 토큰 %d개를 만들어 기대 상한 %.0f개를 넘었습니다. "
+            "max_pixels=%d 가 processor에 적용되지 않은 것입니다."
+            % (largest["id"], largest["visual_tokens"], tokens_upper, max_pixels),
+            detail,
+        )
+    if lower_binding and smallest["visual_tokens"] < lower_allowed:
+        return CheckResult(
+            "pixel_limits",
+            FAIL,
+            "가장 작은 이미지 %s 가 시각 토큰 %d개뿐이어서 기대 하한 %.0f개에 못 미칩니다. "
+            "min_pixels=%d 가 processor에 적용되지 않은 것입니다."
+            % (smallest["id"], smallest["visual_tokens"], tokens_lower, min_pixels),
+            detail,
+        )
+
+    reason = (
+        "최대 %dx%d -> 시각 토큰 %d개, 최소 %dx%d -> 시각 토큰 %d개 "
+        "(기대 상한 %.0f개, 기대 하한 %.0f개)"
+        % (
+            largest["width"], largest["height"], largest["visual_tokens"],
+            smallest["width"], smallest["height"], smallest["visual_tokens"],
+            tokens_upper, tokens_lower,
+        )
+    )
+    if not upper_binding:
+        return CheckResult(
+            "pixel_limits",
+            WARN,
+            reason + ". 다만 표본에서 가장 큰 이미지도 원본이 max_pixels보다 작아서 상한이 "
+            "실제로 걸리는지는 확인하지 못했습니다.",
+            detail,
+        )
+    return CheckResult("pixel_limits", PASS, reason, detail)
+
+
 def check_label_mask(
     processor: Any,
     spec: prompt_mod.PromptSpec,
@@ -664,6 +884,81 @@ def capture_kernel_fallbacks(collector: KernelFallbackCollector) -> Iterator[Ker
                 pass
 
 
+#: Gated DeltaNet 커널이 참조 구현으로 내려갔을 때 경고에 들어가는 낱말들.
+GATED_DELTA_HINTS: tuple[str, ...] = ("gated_delta", "gated delta", "deltanet", "delta_rule")
+
+#: causal-conv1d가 없을 때 나오는 경고에 들어가는 낱말들. 속도 영향이 작아서 따로 본다.
+CAUSAL_CONV_HINTS: tuple[str, ...] = ("causal_conv1d", "causal-conv1d", "short convolution")
+
+#: fla 가속 커널을 설치하는 명령. --no-deps가 아니면 torch와 triton이 함께 바뀐다.
+FLA_INSTALL_COMMAND = (
+    "pip install --no-deps fla-core flash-linear-attention  그리고  pip install einops"
+)
+
+
+def classify_fallbacks(messages: Sequence[str]) -> dict[str, list[str]]:
+    """수집한 fallback 경고를 연산 종류별로 나눈다."""
+    groups: dict[str, list[str]] = {"gated_delta": [], "causal_conv": [], "other": []}
+    for message in messages:
+        lowered = message.lower()
+        if any(hint in lowered for hint in GATED_DELTA_HINTS):
+            groups["gated_delta"].append(message)
+        elif any(hint in lowered for hint in CAUSAL_CONV_HINTS):
+            groups["causal_conv"].append(message)
+        else:
+            groups["other"].append(message)
+    return groups
+
+
+def check_kernel_fast_path(
+    messages: Sequence[str], *, model_loaded: bool = True
+) -> CheckResult:
+    """학습과 추론이 가속 커널 경로로 돌고 있는지 본다.
+
+    Gated DeltaNet이 PyTorch 참조 구현으로 내려가면 학습이 약 두 배 느려진다. 그래도
+    학습 자체는 되므로 FAIL이 아니라 WARN으로 표시하고 설치 명령을 함께 알려 준다.
+    causal-conv1d만 없는 경우는 속도 영향이 작아서 정보로만 남긴다.
+    """
+    if not model_loaded:
+        return CheckResult(
+            "kernel_fast_path", SKIP, "모델을 올리지 않아 커널 경고를 수집하지 못했습니다."
+        )
+    groups = classify_fallbacks(messages)
+    detail = {
+        "messages": list(messages),
+        "gated_delta": groups["gated_delta"],
+        "causal_conv": groups["causal_conv"],
+        "other": groups["other"],
+        "install_command": FLA_INSTALL_COMMAND,
+    }
+    if groups["gated_delta"]:
+        return CheckResult(
+            "kernel_fast_path",
+            WARN,
+            "Gated DeltaNet이 PyTorch 참조 구현으로 내려갔습니다. 학습이 약 2배 느려집니다. "
+            "다음 명령으로 가속 커널을 설치한 뒤 런타임을 재시작하십시오: " + FLA_INSTALL_COMMAND,
+            detail,
+        )
+    if groups["causal_conv"]:
+        return CheckResult(
+            "kernel_fast_path",
+            PASS,
+            "Gated DeltaNet은 가속 커널을 씁니다. causal-conv1d만 참조 구현이며 속도 영향은 작습니다.",
+            detail,
+        )
+    if groups["other"]:
+        return CheckResult(
+            "kernel_fast_path",
+            PASS,
+            "Gated DeltaNet fallback은 없습니다. 분류하지 못한 경고 %d건은 detail에 남겼습니다."
+            % len(groups["other"]),
+            detail,
+        )
+    return CheckResult(
+        "kernel_fast_path", PASS, "커널 fallback 경고가 없습니다.", detail
+    )
+
+
 def fallback_summary(messages: Sequence[str]) -> str:
     """수집한 커널 fallback 경고를 요약 문단으로 만든다. 없으면 빈 문자열이다."""
     if not messages:
@@ -734,6 +1029,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="속도 측정에 쓰는 microbatch 개수 상한 (n-train-steps * grad_accum을 넘지 않게 자른다)",
     )
     parser.add_argument("--csv", default=None, help="점검에 쓸 CSV. 기본값 DATA_ROOT/train.csv")
+    parser.add_argument(
+        "--pixel-sample",
+        type=int,
+        default=DEFAULT_PIXEL_SAMPLE,
+        help="pixel_limits 검사에서 크기를 훑어 볼 이미지 개수 (기본: %d)" % DEFAULT_PIXEL_SAMPLE,
+    )
     parser.add_argument("--skip-model", action="store_true", help="모델 로딩 없이 토큰/템플릿만 점검")
     parser.add_argument(
         "--tf32-ab",
@@ -817,6 +1118,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return check_choice_tokens(processor, spec, image)
 
         flight.run("choice_token_after_tail", choice_check)
+        flight.run(
+            "pixel_limits",
+            lambda: check_pixel_limits(processor, cfg, records, data_root, sample=args.pixel_sample),
+        )
         flight.run("label_mask", lambda: check_label_mask(processor, spec, records, data_root, tokens))
         flight.run(
             "train_infer_prefix_match",
@@ -824,6 +1129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     fallback_collector = KernelFallbackCollector()
+    model_loaded = False
 
     if not args.skip_model and records:
         backend = None
@@ -901,6 +1207,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     backend.model.train()
 
             flight.run("inference", inference_check)
+
+    # 커널 경고는 모델 로딩과 첫 forward에서 나오므로 그 뒤에 판정한다.
+    flight.run(
+        "kernel_fast_path",
+        lambda: check_kernel_fast_path(fallback_collector.messages, model_loaded=model_loaded),
+    )
 
     payload = {
         "created": runtime.now_iso(),

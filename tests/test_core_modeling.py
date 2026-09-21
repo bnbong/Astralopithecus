@@ -170,6 +170,81 @@ def test_count_parameters_splits_trainable():
     assert 0 < counts["trainable"] < counts["total"]
 
 
+# --------------------------------------------------------------------------
+# OOM 조기 중단
+# --------------------------------------------------------------------------
+
+
+def test_is_oom_error_matches_message():
+    assert modeling.is_oom_error(RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB"))
+    assert modeling.is_oom_error(RuntimeError("HIP out of memory"))
+    assert not modeling.is_oom_error(ValueError("알 수 없는 config 키"))
+
+
+def test_is_oom_error_matches_torch_type():
+    oom_type = getattr(torch.cuda, "OutOfMemoryError", None)
+    if oom_type is None:
+        pytest.skip("이 torch 버전에는 OutOfMemoryError가 없습니다.")
+    assert modeling.is_oom_error(oom_type("전혀 다른 문구"))
+
+
+def test_load_base_model_aborts_on_oom(monkeypatch):
+    """OOM이면 다음 Auto 클래스를 시도하지 않고 바로 안내와 함께 멈춘다."""
+    tried: list[str] = []
+
+    class OomClass:
+        @staticmethod
+        def from_pretrained(_src, **_kwargs):
+            tried.append("first")
+            raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+
+    class NeverReached:
+        @staticmethod
+        def from_pretrained(_src, **_kwargs):
+            tried.append("second")
+            raise AssertionError("OOM 뒤에는 다음 후보를 시도하면 안 됩니다.")
+
+    monkeypatch.setattr(
+        modeling,
+        "_auto_classes",
+        lambda: [("AutoModelForMultimodalLM", OomClass), ("AutoModelForVision2Seq", NeverReached)],
+    )
+    with pytest.raises(modeling.ModelLoadError) as excinfo:
+        modeling.load_base_model({}, source="dummy")
+
+    message = str(excinfo.value)
+    assert "GPU 여유 메모리가 부족" in message
+    assert "nvidia-smi" in message and "vqa.jobs list" in message
+    assert "CUDA out of memory" in message  # 원래 예외 메시지도 남긴다
+    assert tried == ["first"]
+
+
+def test_load_base_model_falls_through_non_oom_errors(monkeypatch):
+    """OOM이 아닌 실패는 예전처럼 다음 후보로 넘어간다."""
+    tried: list[str] = []
+
+    class Unsupported:
+        @staticmethod
+        def from_pretrained(_src, **_kwargs):
+            tried.append("first")
+            raise ValueError("Unrecognized configuration class")
+
+    class Works:
+        @staticmethod
+        def from_pretrained(_src, **_kwargs):
+            tried.append("second")
+            return FakeQwen35(n_language=1, n_vision=1)
+
+    monkeypatch.setattr(
+        modeling,
+        "_auto_classes",
+        lambda: [("AutoModelForMultimodalLM", Unsupported), ("AutoModelForVision2Seq", Works)],
+    )
+    _model, used = modeling.load_base_model({}, source="dummy", for_training=False)
+    assert used == "AutoModelForVision2Seq"
+    assert tried == ["first", "second"]
+
+
 def test_build_lora_model_wraps_only_language(tmp_path):
     """PEFT를 실제로 붙여 vision 쪽에 adapter가 생기지 않는지 확인한다."""
     peft = pytest.importorskip("peft")
