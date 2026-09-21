@@ -16,6 +16,12 @@ test 를 5대로 나눠 추론 (2번째 조각):
     python infer_val.py --csv data/test.csv --data-dir data --model <모델 경로> \
         --shard 1/5 --out preds_test_s2of5.csv
 
+학습한 LoRA 어댑터로 추론 (학습 때 쓴 프롬프트와 반드시 같아야 함):
+    python infer_val.py --csv data/train.csv --split data/val_fold0.csv --data-dir data \
+        --model Qwen/Qwen2.5-VL-3B-Instruct --adapter <어댑터 폴더> \
+        --prompt-file train_prompt.txt --system "<학습 때 쓴 system 문구>" --out preds_lora_fold0.csv
+    (prompt-file 은 {question} {a} {b} {c} {d} 자리표시자가 들어 있는 텍스트 파일)
+
 중간에 끊겨도 같은 명령을 다시 실행하면 이미 끝난 id 는 건너뛰고 이어서 진행한다.
 주의: test.csv 에는 정답이 없다. test 로 학습하거나 튜닝하지 않는다(규칙: Data Leakage 금지).
 """
@@ -44,6 +50,18 @@ PROMPTS = {
         "정답을 a, b, c, d 중 하나의 알파벳 소문자로만 답하세요."
     ),
 }
+
+
+def load_template(prompt, prompt_file):
+    """--prompt-file 이 있으면 그 파일 내용을, 없으면 PROMPTS[prompt] 를 템플릿으로 쓴다."""
+    if prompt_file:
+        with open(prompt_file, encoding="utf-8") as f:
+            tpl = f.read().rstrip("\n")
+        missing = [k for k in ("{question}", "{a}", "{b}", "{c}", "{d}") if k not in tpl]
+        if missing:
+            raise SystemExit(f"[오류] {prompt_file} 에 자리표시자가 없습니다: {missing}")
+        return tpl
+    return PROMPTS[prompt]
 
 
 def norm_id(x):
@@ -86,12 +104,16 @@ def parse_shard(text):
 class Scorer:
     """모델을 올리고, 문항 묶음에 대해 a~d 확률을 계산한다."""
 
-    def __init__(self, model_path, max_pixels, min_pixels, load_4bit, prompt):
+    def __init__(self, model_path, max_pixels, min_pixels, load_4bit, template,
+                 system_text=None, adapter=None, no_thinking=False):
         import torch
         from transformers import AutoProcessor
 
         self.torch = torch
-        self.template = PROMPTS[prompt]
+        self.template = template
+        self.system_text = system_text
+        self.no_thinking = no_thinking   # Qwen3 계열의 thinking 모드를 끈다 (템플릿 인자 enable_thinking=False)
+        self.last_mass = None            # 마지막 배치에서 a~d 네 글자가 차지한 확률 질량
 
         kwargs = {}
         if load_4bit:
@@ -107,6 +129,10 @@ class Scorer:
         except ImportError:  # 구버전 transformers
             from transformers import Qwen2_5_VLForConditionalGeneration as ModelCls
         self.model = ModelCls.from_pretrained(model_path, device_map="auto", **kwargs).eval()
+        if adapter:   # 학습한 LoRA 어댑터를 얹는다
+            from peft import PeftModel
+            self.model = PeftModel.from_pretrained(self.model, adapter).eval()
+            print(f"[어댑터 로드] {adapter}")
 
         self.processor = AutoProcessor.from_pretrained(
             model_path, min_pixels=min_pixels, max_pixels=max_pixels)
@@ -129,13 +155,19 @@ class Scorer:
                 question=r["question"], a=r["a"], b=r["b"], c=r["c"], d=r["d"])
             messages = [{"role": "user", "content": [
                 {"type": "image"}, {"type": "text", "text": prompt}]}]
+            if self.system_text:
+                messages.insert(0, {"role": "system", "content": [
+                    {"type": "text", "text": self.system_text}]})
+            extra = {"enable_thinking": False} if self.no_thinking else {}
             texts.append(self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True))
+                messages, tokenize=False, add_generation_prompt=True, **extra))
 
         inputs = self.processor(text=texts, images=images, padding=True, return_tensors="pt")
         inputs = inputs.to(self.model.device)
         with torch.no_grad():
             logits = self.model(**inputs).logits[:, -1, :]      # 다음 토큰 분포
+        full = torch.softmax(logits.float(), dim=-1)
+        self.last_mass = full[:, self.letter_ids].sum(dim=-1).cpu().numpy()   # 진단용
         four = logits[:, self.letter_ids].float()               # a,b,c,d 만 비교
         return torch.softmax(four, dim=-1).cpu().numpy()
 
@@ -157,6 +189,7 @@ def run(df, scorer, out_path, data_dir, batch_size, log_every=20):
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     write_header = not os.path.exists(out_path)
     start, n_done = time.time(), 0
+    masses = []
 
     for i in range(0, len(todo), batch_size):
         chunk = todo.iloc[i:i + batch_size]
@@ -169,6 +202,9 @@ def run(df, scorer, out_path, data_dir, batch_size, log_every=20):
             images.append(Image.open(p).convert("RGB"))
 
         probs = scorer.score(rows, images)
+        m = getattr(scorer, "last_mass", None)
+        if m is not None:
+            masses.extend(float(x) for x in m)
         out = pd.DataFrame({
             "id": [r["id"] for r in rows],
             "pred": [LETTERS[int(p.argmax())] for p in probs],
@@ -184,6 +220,13 @@ def run(df, scorer, out_path, data_dir, batch_size, log_every=20):
 
     el = time.time() - start
     print(f"\n완료: {n_done}문항, 문항당 평균 {el / n_done:.2f}초 → 결과 {out_path}")
+    if masses:
+        avg = sum(masses) / len(masses)
+        print(f"[진단] 다음 토큰 확률 중 a/b/c/d 네 글자가 차지한 비율 평균: {avg:.3f}")
+        if avg < 0.5:
+            print("[경고] 이 비율이 낮습니다. 모델이 답 대신 다른 글자(예: thinking 시작 토큰)를 내려는 상태일 수 있어요. "
+                  "Qwen3 계열이면 --no-thinking 을 켜고, 프롬프트가 학습 때와 같은지 확인하세요. "
+                  "이 상태의 pred 는 평가에 쓰면 안 됩니다.")
 
 
 def main():
@@ -196,6 +239,12 @@ def main():
     ap.add_argument("--shard", type=parse_shard, default=None, help="예: 2/5 = 전체를 5조각으로 나눈 2번째")
     ap.add_argument("--limit", type=int, default=None, help="앞에서 N문항만 (동작 확인용)")
     ap.add_argument("--prompt", default="p1", choices=sorted(PROMPTS), help="프롬프트 버전")
+    ap.add_argument("--prompt-file", default=None,
+                    help="프롬프트 템플릿 파일 ({question} {a} {b} {c} {d} 포함). 주면 --prompt 는 무시")
+    ap.add_argument("--system", default=None, help="system 메시지 문구 (학습 때 썼다면 똑같이)")
+    ap.add_argument("--adapter", default=None, help="LoRA 어댑터 폴더 (학습 결과)")
+    ap.add_argument("--no-thinking", action="store_true",
+                    help="Qwen3 계열의 thinking 모드 끄기 (chat template 에 enable_thinking=False 전달)")
     ap.add_argument("--batch-size", type=int, default=2, help="OOM 이 나면 1로")
     ap.add_argument("--max-pixels", type=int, default=1024 * 28 * 28, help="이미지 해상도 상한")
     ap.add_argument("--min-pixels", type=int, default=256 * 28 * 28)
@@ -206,9 +255,14 @@ def main():
         print("[주의] test 에 --split 을 쓰고 있습니다. 검증 분할은 train 기준입니다.")
 
     df = load_rows(args.csv, args.split, args.shard, args.limit)
-    print(f"추론 대상 {len(df)}문항 | 프롬프트 {args.prompt} | max_pixels {args.max_pixels} | 배치 {args.batch_size}")
+    template = load_template(args.prompt, args.prompt_file)
+    prompt_name = f"file:{args.prompt_file}" if args.prompt_file else args.prompt
+    print(f"추론 대상 {len(df)}문항 | 프롬프트 {prompt_name} | max_pixels {args.max_pixels} | 배치 {args.batch_size}"
+          f" | 어댑터 {args.adapter or '없음'} | system {'있음' if args.system else '없음'}"
+          f" | thinking {'끔' if args.no_thinking else '기본'}")
 
-    scorer = Scorer(args.model, args.max_pixels, args.min_pixels, args.load_4bit, args.prompt)
+    scorer = Scorer(args.model, args.max_pixels, args.min_pixels, args.load_4bit, template,
+                    system_text=args.system, adapter=args.adapter, no_thinking=args.no_thinking)
     run(df, scorer, args.out, args.data_dir, args.batch_size)
 
 
