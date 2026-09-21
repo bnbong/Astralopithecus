@@ -1,7 +1,7 @@
 # Colab Pro+ A100 80GB / transformers 5.x / Qwen3.5-27B bf16 LoRA.
 # 참고 실행(다른 팀, A100-80GB, 1024 visual token): peak 57GB, 3.37 s/microstep, 5k 표본 1 epoch에 4h38m.
 model_id: Qwen/Qwen3.5-27B
-revision: null
+revision: fc05daec18b0a78c049392ed2e771dde82bdf654   # 2026-09-21 Colab A100에서 받은 스냅샷 커밋
 model_path: null          # 오프라인이면 로컬 스냅샷 디렉터리를 여기에 적는다
 precision: bf16
 attn_implementation: sdpa

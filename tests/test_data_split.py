@@ -416,3 +416,84 @@ def test_stratification_tracks_the_answer_distribution(tiny_root: Path) -> None:
     assert len(result.val_ids) == 8
     # The synthetic answers are perfectly balanced, so each letter appears twice.
     assert set(result.val_answer_counts.values()) == {2}
+
+
+# --------------------------------------------------------------------------- #
+# fold CSV -> split JSON
+# --------------------------------------------------------------------------- #
+def write_fold_files(root: Path, val_ids: list[str], train_ids: list[str]) -> Path:
+    fold_dir = root / "fold_csv_files"
+    fold_dir.mkdir(parents=True, exist_ok=True)
+    (fold_dir / "val_fold0.csv").write_text("id\n" + "\n".join(val_ids) + "\n", encoding="utf-8")
+    (fold_dir / "train_fold1234.csv").write_text(
+        "id\n" + "\n".join(train_ids) + "\n", encoding="utf-8"
+    )
+    return fold_dir
+
+
+def run_folds_to_split(fold_dir: Path, data_root: Path, out_dir: Path) -> int:
+    import sys as _sys
+
+    from scripts import folds_to_split as folds_cli
+
+    argv = _sys.argv
+    _sys.argv = [
+        "folds_to_split.py",
+        "--fold-dir",
+        str(fold_dir),
+        "--data-root",
+        str(data_root),
+        "--out-dir",
+        str(out_dir),
+    ]
+    try:
+        return folds_cli.main()
+    finally:
+        _sys.argv = argv
+
+
+def test_folds_to_split_writes_the_schema_train_py_reads(tmp_path: Path) -> None:
+    import json
+
+    val_ids = ["train_0002.jpg", "train_0004.jpg"]
+    train_ids = ["train_0001.jpg", "train_0003.jpg", "train_0005.jpg"]
+    fold_dir = write_fold_files(tmp_path, val_ids, train_ids)
+    out_dir = tmp_path / "out"
+
+    assert run_folds_to_split(fold_dir, tmp_path, out_dir) == 0
+
+    payload = json.loads((out_dir / "split_fold0.json").read_text(encoding="utf-8"))
+    assert payload["version"] == "fold0"
+    assert payload["train_ids"] == sorted(train_ids)
+    assert payload["val_ids"] == sorted(val_ids)
+    assert payload["n_train"] == 3 and payload["n_val"] == 2
+    assert set(payload["source_files"]) == {"val_fold0.csv", "train_fold1234.csv"}
+    # content 해시는 created 줄을 빼고 계산한다.
+    assert payload["content_sha256"] == content_hash(
+        {k: v for k, v in payload.items() if k not in {"created", "content_sha256"}}
+    )
+
+    ids = (out_dir / "val_fold0_ids.txt").read_text(encoding="utf-8").split()
+    assert ids == sorted(val_ids)
+
+
+def test_folds_to_split_refuses_overlapping_ids(tmp_path: Path) -> None:
+    fold_dir = write_fold_files(
+        tmp_path, ["train_0001.jpg"], ["train_0001.jpg", "train_0002.jpg"]
+    )
+    with pytest.raises(SystemExit, match="겹칩니다"):
+        run_folds_to_split(fold_dir, tmp_path, tmp_path / "out")
+
+
+def test_folds_to_split_output_is_committed_and_current() -> None:
+    """저장소에 들어 있는 split_fold0.json이 fold CSV와 같은 내용인지 확인한다."""
+    import json
+
+    repo = Path(__file__).resolve().parents[1]
+    split_path = repo / "artifacts" / "data" / "split_fold0.json"
+    if not split_path.exists():
+        pytest.skip("artifacts/data/split_fold0.json이 아직 없습니다.")
+    payload = json.loads(split_path.read_text(encoding="utf-8"))
+    assert payload["n_val"] == 1344
+    assert payload["n_train"] == 5358
+    assert not set(payload["train_ids"]) & set(payload["val_ids"])

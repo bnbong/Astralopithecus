@@ -243,3 +243,78 @@ def test_ocr_prompt_reaches_the_tokenized_text(processor, image):
     text = prompt_mod.apply_template(processor, messages, add_generation_prompt=True)
     assert "SUNDAY BURGER LOVE" in text
     assert "틀릴 수 있습니다" in text
+
+
+# --------------------------------------------------------------------------
+# v2_read_text (팀원 스크립트 p2 재현)
+# --------------------------------------------------------------------------
+
+#: infer_val.py의 PROMPTS["p2"]를 그대로 옮긴 템플릿. 테스트가 원본과 비교하는 기준이다.
+TEAMMATE_P2_TEMPLATE = (
+    "이미지를 자세히 보고, 이미지에 적힌 글자를 정확히 읽어서 질문에 답하세요.\n\n"
+    "질문: {question}\n\n"
+    "a. {a}\nb. {b}\nc. {c}\nd. {d}\n\n"
+    "정답을 a, b, c, d 중 하나의 알파벳 소문자로만 답하세요."
+)
+
+
+def test_teammate_template_constant_matches_infer_val_source():
+    """infer_val.py를 직접 읽어서 위 상수가 원본과 같은지 확인한다."""
+    import ast
+
+    source = (Path(__file__).resolve().parents[1] / "infer_val.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    prompts = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "PROMPTS" for t in node.targets
+        ):
+            prompts = ast.literal_eval(node.value)
+    assert prompts is not None, "infer_val.py에서 PROMPTS를 찾지 못했습니다."
+    assert prompts["p2"] == TEAMMATE_P2_TEMPLATE
+
+
+def test_v2_read_text_user_text_equals_the_teammate_prompt():
+    spec = prompt_mod.get_prompt("v2_read_text")
+    question = "사진 속 선반에 적힌 문구는 무엇인가요?"
+    options = ["SUNDAY BURGER LOVE", "MONDAY SALAD TIME", "FRIDAY PIZZA PARTY", "WEDNESDAY SOUP DAY"]
+    expected = TEAMMATE_P2_TEMPLATE.format(
+        question=question, a=options[0], b=options[1], c=options[2], d=options[3]
+    )
+    assert spec.user_text(question, options) == expected
+
+
+def test_v2_read_text_has_no_system_turn_like_infer_val():
+    """infer_val.py는 user turn 하나만 넣고 이미지를 텍스트 앞에 둔다."""
+    spec = prompt_mod.get_prompt("v2_read_text")
+    messages = prompt_mod.build_messages(spec, "IMG", "질문", ["가", "나", "다", "라"])
+    assert [m["role"] for m in messages] == ["user"]
+    assert [c["type"] for c in messages[0]["content"]] == ["image", "text"]
+
+
+def test_v2_read_text_prefix_and_label_mask_still_hold(processor, image):
+    """프롬프트를 바꿔도 감독 토큰은 하나이고 추론 prefix와 일치해야 한다."""
+    spec = prompt_mod.get_prompt("v2_read_text")
+    tail = prompt_mod.full_generation_prompt(processor, spec, image)
+    tokens = prompt_mod.resolve_choice_tokens(processor, tail)
+    collate = collator_mod.AnswerOnlyCollator(processor=processor, spec=spec, choice_tokens=tokens)
+
+    views = make_views(image, spec)
+    enc = collate(views)
+    labels = enc["labels"]
+    assert (labels != -100).sum(dim=1).tolist() == [1, 1]
+    for b, view in enumerate(views):
+        position = int(torch.where(labels[b] != -100)[0][0])
+        assert int(labels[b, position]) == tokens.ids["abcd".index(view.gold_letter)]
+        report = collator_mod.compare_prefix_with_inference(
+            processor, spec, view, enc["input_ids"][b], position
+        )
+        assert report["match"], report
+
+
+def test_v2_read_text_ocr_adds_the_reference_block():
+    spec = prompt_mod.get_prompt("v2_read_text_ocr")
+    text = spec.user_text("질문", ["가", "나", "다", "라"], "SUNDAY BURGER LOVE")
+    assert text.startswith("이미지를 자세히 보고")
+    assert "SUNDAY BURGER LOVE" in text
+    assert text.endswith("정답을 a, b, c, d 중 하나의 알파벳 소문자로만 답하세요.")

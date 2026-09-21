@@ -25,7 +25,7 @@ Qwen3.5는 transformers 5.x에서만 로드됩니다. 그래서 환경을 두 �
 | 노트북 | 담당 | 목적 |
 |---|---|---|
 | `00_lab_env_check.ipynb` | 전원 | GPU와 패키지 설치 확인 |
-| `01_data_audit_split.ipynb` | 수빈 | 데이터 검사와 고정 split 생성 |
+| `01_data_audit_split.ipynb` | 수빈 | 데이터 검사와 공식 split 확정 |
 | `10_lab_baseline_zero_shot.ipynb` | 누구나 | 학습 없는 첫 정확도와 첫 제출 후보 |
 | `11_lab_prompt_ocr_compare.ipynb` | 창혁 | 프롬프트와 OCR, 해상도 동결 |
 | `12_lab_train_9b_qlora.ipynb` | 유림 | 실습실 9B NF4 QLoRA 학습 |
@@ -38,7 +38,8 @@ Qwen3.5는 transformers 5.x에서만 로드됩니다. 그래서 환경을 두 �
 ## 자주 쓰는 명령
 
 ```
-python -m vqa.train --config configs/lab_qwen35_9b.yaml --run-id ft9_v1 --split artifacts/data/split_v1.json
+python scripts/folds_to_split.py
+python -m vqa.train --config configs/lab_qwen35_9b.yaml --run-id ft9_v1 --split artifacts/data/split_fold0.json
 python -m vqa.jobs start --name ft9_v1 --auto-restart 5 -- python -m vqa.train --config configs/lab_qwen35_9b.yaml --run-id ft9_v1
 python -m vqa.jobs status --name ft9_v1
 python -m vqa.predict --config configs/lab_qwen35_9b.yaml --run-id ft9_v1 --csv test.csv --out-name ft9_test
@@ -50,17 +51,17 @@ python scripts/check_submission.py --submission artifacts/submission/final.csv -
 
 ## 팀 규칙
 
-- validation split은 고정합니다. 내용 해시는 `c929ac2059dccfa127c67d5f738f1bbc648c031abe73ec6bbedc18f48b54d5cb`입니다. train은 6214문항, validation은 500문항입니다. 값이 다르면 즉시 팀 채널에 알리십시오.
-- test로는 어떤 조정도 하지 않습니다. 프롬프트와 하이퍼파라미터는 고정 validation에서만 비교합니다.
+- 공식 검증셋은 fold 0의 1,344문항입니다. 파일은 `fold_csv_files/val_fold0.csv`입니다. 학습에는 `fold_csv_files/train_fold1234.csv`의 5,358문항을 씁니다. 이 파일에서는 test와 이미지가 동일한 train 24문항을 이미 빼 두었습니다.
+- 두 CSV를 합친 `artifacts/data/split_fold0.json`이 `vqa.train --split` 에 넘기는 공식 파일입니다. `python scripts/folds_to_split.py`로 다시 만들 수 있고, 내용 해시는 `ea2c8572129342f138c551e6e32a3427902c730db349c45d0e5342f03dfccae0`입니다. 값이 다르면 즉시 팀 채널에 알리십시오.
+- 검증 500문항을 쓰던 `artifacts/data/split_v1.json`은 폐기했습니다. 자세한 내용은 `artifacts/data/README.md`에 적어 두었습니다.
+- 넘어야 할 기준선은 Qwen2.5-VL-3B zero-shot에 프롬프트 p2를 쓴 fold 0 정확도 0.9159입니다. 같은 모델의 Kaggle public 점수는 0.89871입니다.
+- fold 0과 학습 분할에 걸쳐 있는 근접 중복 이미지가 한 쌍 남아 있습니다. `train_0395.jpg`와 `train_4458.jpg`이며 perceptual hash로만 일치합니다. 문항 수로 보면 영향이 무시할 만한 수준이라서 그대로 둡니다.
+- test로는 어떤 조정도 하지 않습니다. 프롬프트와 하이퍼파라미터는 fold 0에서만 비교합니다.
 - 예측 확률 파일의 컬럼은 `id,p_a,p_b,p_c,p_d,run_id` 순서를 지킵니다.
 - 노트북은 직접 고치지 마십시오. `python scripts/build_notebooks.py`로 다시 생성합니다.
 
 ## 현재 상태 (2026-09-21)
 
-지금까지 확인된 것은 CPU 단위 테스트가 통과한다는 사실입니다. GPU와 Colab, Windows 실습실에서는 아직 한 번도 실행해 보지 않았습니다. 처음 GPU에서 preflight를 돌릴 때 다음 세 가지를 반드시 확인해야 합니다.
+Colab A100에서 27B를 처음으로 돌렸습니다. 40GB에서는 nf4가 preflight를 모두 통과했고, 80GB에서는 bf16이 동작했습니다. 측정값은 `results/README.md`에 정리해 두었으며, bf16을 팀 주력 정밀도로 정했습니다. 실행 중에 드러난 문제는 모두 고쳤습니다. Colab은 노트북마다 가상 머신을 따로 배정하므로, 새 노트북을 열 때마다 `requirements/colab.txt` 설치를 다시 해야 합니다. Windows 실습실 경로는 아직 실행해 보지 않았습니다.
 
-- NF4 4비트 경로의 순전파와 역전파가 정상적으로 동작하는지 확인해야 합니다.
-- Qwen3.5의 LoRA 대상 모듈이 올바른지 확인해야 합니다.
-- 학습과 추론의 prefix가 일치하는지 확인해야 합니다.
-
-저장소 루트의 `check_submission.py`와 `eval_val.py`는 확률 컬럼으로 `prob_a`부터 `prob_d`까지를, `vqa` 패키지와 `scripts/`는 `p_a`부터 `p_d`까지를 씁니다.
+저장소 루트의 `check_submission.py`와 `eval_val.py`는 확률 컬럼으로 `prob_a`부터 `prob_d`까지를, `vqa` 패키지와 `scripts/`는 `p_a`부터 `p_d`까지를 씁니다. `vqa.predictions.load_predictions`는 두 이름을 모두 읽으므로 `scripts/combine.py`와 `scripts/evaluate_run.py`에 팀원 파일을 바로 넘길 수 있습니다. 파일 자체를 바꿔야 한다면 `python scripts/convert_preds.py --to teammate` 또는 `--to vqa`를 쓰십시오.

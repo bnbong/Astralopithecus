@@ -1,0 +1,30 @@
+# Colab과 실습실 Linux가 항상 LF를 받도록 줄바꿈을 고정한다.
+# macOS에서 core.autocrlf가 켜져 있어도 저장소에는 LF만 들어간다.
+* text=auto eol=lf
+
+*.ipynb text eol=lf
+*.py    text eol=lf
+*.sh    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.csv   text eol=lf
+*.json  text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+
+# 바이너리. 줄바꿈 변환을 하면 파일이 깨진다.
+*.png          binary
+*.jpg          binary
+*.jpeg         binary
+*.gif          binary
+*.webp         binary
+*.zip          binary
+*.7z           binary
+*.tar          binary
+*.gz           binary
+*.safetensors  binary
+*.bin          binary
+*.pt           binary
+*.pth          binary
+*.gguf         binary
+*.npz          binary

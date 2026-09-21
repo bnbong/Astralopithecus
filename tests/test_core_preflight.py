@@ -7,7 +7,9 @@ optimizer step 한 개는 그 grad_accum배다. 이 둘을 섞으면 학습 시�
 
 from __future__ import annotations
 
+import logging
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -38,23 +40,29 @@ def make_records(n: int = 40) -> list[VQARecord]:
 class FakeBackend:
     """forward+backward를 흉내내며 어떤 id가 몇 번 들어왔는지 기록한다."""
 
-    def __init__(self) -> None:
+    def __init__(self, prepare_sleep: float = 0.0, compute_sleep: float = 0.0) -> None:
         self.param = torch.nn.Parameter(torch.zeros(2))
         self.seen: list[str] = []
+        self.prepare_sleep = prepare_sleep
+        self.compute_sleep = compute_sleep
 
     def trainable_parameters(self):
         return [self.param]
 
     def make_micro_batch(self, ids, epoch):  # noqa: ARG002
         self.seen.extend(ids)
+        if self.prepare_sleep:
+            time.sleep(self.prepare_sleep)
         return list(ids)
 
     def compute_loss(self, batch):  # noqa: ARG002
+        if self.compute_sleep:
+            time.sleep(self.compute_sleep)
         return (self.param + 1.0).pow(2).sum()
 
 
-def run(records, **kwargs):
-    backend = FakeBackend()
+def run(records, backend=None, **kwargs):
+    backend = backend or FakeBackend()
     result = preflight_mod.check_forward_backward(backend, records, kwargs.pop("n_steps", 4), **kwargs)
     return backend, result
 
@@ -122,3 +130,157 @@ def test_no_labeled_records_is_skipped():
         record.answer_idx = None
     _, result = run(records)
     assert result.status == preflight_mod.SKIP
+
+
+# --------------------------------------------------------------------------
+# 준비 시간과 계산 시간의 분리
+# --------------------------------------------------------------------------
+
+
+def test_prepare_and_compute_are_measured_separately():
+    """CPU 배치 준비와 GPU 계산을 나누어 재고, 합은 예전 키의 의미를 유지한다."""
+    backend = FakeBackend(prepare_sleep=0.01, compute_sleep=0.003)
+    _, result = run(make_records(), backend=backend, n_steps=1, grad_accum=4)
+    detail = result.detail
+    assert detail["sec_prepare_mean"] > detail["sec_compute_mean"]
+    assert detail["sec_per_microbatch_mean"] == pytest.approx(
+        detail["sec_prepare_mean"] + detail["sec_compute_mean"], rel=0.05
+    )
+    # 예산에 쓰는 값의 의미는 그대로다.
+    assert detail["sec_per_optimizer_step"] == pytest.approx(detail["sec_per_microbatch_mean"] * 4)
+
+
+def test_timing_summary_reports_the_prepare_compute_split():
+    backend = FakeBackend(prepare_sleep=0.002, compute_sleep=0.002)
+    _, result = run(make_records(), backend=backend, n_steps=1, grad_accum=4)
+    text = preflight_mod.timing_summary([result])
+    assert "sec_prepare_mean" in text
+    assert "sec_compute_mean" in text
+    assert "CPU 배치 준비" in text
+    assert "GPU forward+backward" in text
+
+
+# --------------------------------------------------------------------------
+# TF32 A/B
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def keep_tf32_flags():
+    """A/B 측정은 전역 torch 플래그를 건드리므로 테스트가 끝나면 되돌려 놓는다."""
+    before = preflight_mod.runtime.tf32_state()
+    yield before
+    preflight_mod.runtime.apply_tf32(bool(before.get("matmul")))
+
+
+def test_tf32_ab_runs_both_sides_and_restores_the_configured_flag(keep_tf32_flags):
+    backend = FakeBackend()
+    _, result = run(backend=backend, records=make_records(40), n_steps=4, grad_accum=8, tf32_ab=True, tf32_enabled=True)
+    ab = result.detail["tf32_ab"]
+    assert set(ab) == {"off", "on"}
+    for side in ab.values():
+        assert side["microbatches"] == preflight_mod.TF32_AB_MICROBATCHES
+        assert side["warmups"] == preflight_mod.TF32_AB_WARMUPS
+        assert side["sec_per_microbatch_mean"] == pytest.approx(
+            side["sec_prepare_mean"] + side["sec_compute_mean"], abs=1e-6
+        )
+    assert ab["off"]["tf32"]["requested"] is False
+    assert ab["on"]["tf32"]["requested"] is True
+    # 측정이 끝나면 설정값으로 되돌아온다.
+    assert result.detail["tf32"]["requested"] is True
+    assert torch.backends.cuda.matmul.allow_tf32 is True
+    assert "TF32 off" in result.reason
+
+
+def test_tf32_ab_restores_the_flag_when_it_is_configured_off(keep_tf32_flags):
+    _, result = run(make_records(40), n_steps=4, grad_accum=8, tf32_ab=True, tf32_enabled=False)
+    assert result.detail["tf32"]["requested"] is False
+    assert torch.backends.cuda.matmul.allow_tf32 is False
+
+
+def test_tf32_ab_is_not_run_by_default():
+    _, result = run(make_records(40), n_steps=4, grad_accum=8)
+    assert "tf32_ab" not in result.detail
+    # A/B를 돌리지 않아도 현재 플래그 상태는 기록한다.
+    assert set(result.detail["tf32"]) >= {"matmul", "cudnn", "float32_matmul_precision"}
+
+
+def test_tf32_ab_summary_prints_both_means(keep_tf32_flags):
+    _, result = run(make_records(40), n_steps=4, grad_accum=8, tf32_ab=True, tf32_enabled=True)
+    text = preflight_mod.timing_summary([result])
+    assert "TF32 A/B" in text
+    assert "TF32 off" in text and "TF32 on" in text
+    assert "TF32 속도 배수" in text
+
+
+def test_tf32_ab_cli_flag_defaults_to_off():
+    args = preflight_mod.build_parser().parse_args(["--config", "configs/lab_qwen35_9b.yaml"])
+    assert args.tf32_ab is False
+    args = preflight_mod.build_parser().parse_args(["--config", "configs/lab_qwen35_9b.yaml", "--tf32-ab"])
+    assert args.tf32_ab is True
+
+
+# --------------------------------------------------------------------------
+# 커널 fallback 경고 수집
+# --------------------------------------------------------------------------
+
+
+def test_kernel_fallback_warnings_are_collected_without_duplicates():
+    collector = preflight_mod.KernelFallbackCollector()
+    logger = logging.getLogger("transformers")
+    with preflight_mod.capture_kernel_fallbacks(collector):
+        logger.warning("Falling back to the reference PyTorch implementation of gated delta rule.")
+        logger.warning("Falling back to the reference PyTorch implementation of gated delta rule.")
+        logger.warning("The fast path is not available because ...")
+        logger.warning("모델을 불러왔습니다.")
+    assert len(collector.messages) == 2
+    assert any("reference PyTorch" in m for m in collector.messages)
+    assert any("fast path" in m for m in collector.messages)
+    # 핸들러는 블록이 끝나면 떨어진다.
+    assert collector not in logger.handlers
+
+
+def test_kernel_fallback_summary_is_empty_when_nothing_is_captured():
+    collector = preflight_mod.KernelFallbackCollector()
+    with preflight_mod.capture_kernel_fallbacks(collector):
+        logging.getLogger("transformers").warning("평범한 메시지입니다.")
+    assert collector.messages == []
+    assert preflight_mod.fallback_summary(collector.messages) == ""
+    assert "커널 fallback" in preflight_mod.fallback_summary(["Falling back to eager attention."])
+
+
+# --------------------------------------------------------------------------
+# 추론 시간의 분리
+# --------------------------------------------------------------------------
+
+
+class FakeScorer:
+    """encode에서 CPU 준비를, score에서 GPU 계산을 흉내낸다."""
+
+    def __init__(self, prepare_sleep: float = 0.004, compute_sleep: float = 0.001) -> None:
+        self.prepare_sleep = prepare_sleep
+        self.compute_sleep = compute_sleep
+
+    def encode(self, records, perm):  # noqa: ARG002
+        time.sleep(self.prepare_sleep)
+        return list(records)
+
+    def score(self, enc, *, also_base: bool = False):  # noqa: ARG002
+        import numpy as np
+
+        time.sleep(self.compute_sleep)
+        return np.full((len(enc), 4), 0.25), None
+
+
+def test_inference_splits_prepare_and_compute_time():
+    result = preflight_mod.check_inference(FakeScorer(), make_records(6), 6, 1)
+    assert result.status == preflight_mod.PASS
+    detail = result.detail
+    assert detail["sec_prepare_mean"] > detail["sec_compute_mean"]
+    assert detail["seconds_per_item"] == pytest.approx(
+        detail["sec_prepare_mean"] + detail["sec_compute_mean"], rel=0.2
+    )
+    assert detail["items"] == 6
+    text = preflight_mod.timing_summary([result])
+    assert "초/문항 (CPU 배치 준비)" in text
+    assert "초/문항 (GPU scoring forward)" in text

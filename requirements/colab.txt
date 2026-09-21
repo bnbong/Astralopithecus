@@ -1,38 +1,39 @@
 # Colab Pro+ / A100 / Qwen3.5-27B
 # Colab은 torch와 CUDA가 이미 깔려 있다. torch를 여기서 다시 설치하지 않는다.
-# 참고 실행에서 확인된 조합: torch 2.11.0+cu128, transformers 5.x(git main), peft 0.20.0.
 #
-# 노트북 첫 셀:
-#   !pip uninstall -y torchao
-#   !pip install -q -U git+https://github.com/huggingface/transformers
-#   !pip install -q -U -r requirements/colab.txt
-#   그 다음 런타임을 재시작한다.
+# 아래 버전은 2026-09-21 A100(Colab)에서 실제로 preflight와 bf16 학습을 통과한 조합이다.
+# 같은 날 env_lock.txt에서 그대로 옮겼다. 바꿀 때는 새 env_lock.txt 값으로 함께 고친다.
+#   torch 2.11.0+cu128 / torchvision 0.26.0+cu128 (둘 다 Colab 기본 이미지에 있음)
 #
-# TODO 표시가 붙은 줄은 첫 preflight PASS 직후 `pip freeze` 값으로 고정한다.
+# 노트북 20번과 21번의 "환경 설치와 확인" 셀이 다음 순서로 이 파일을 쓴다.
+#   1) pip uninstall -y torchao
+#   2) pip install -q -r requirements/colab.txt
+#   3) 별도 프로세스에서 import 점검
+#
+# 노트북마다 가상 머신이 따로 배정되므로, 새 노트북을 열 때마다 이 설치를 다시 해야 한다.
 
-# transformers는 위 git 설치로 들어온다. 재현을 위해 실제로 쓴 커밋을 run_manifest에 남기고
-# 아래 줄을 그 커밋으로 바꿔 고정한다.
-# git+https://github.com/huggingface/transformers@<commit>   # TODO: 첫 성공 실행의 커밋 해시로 고정
+transformers==5.16.1          # 2026-09-21, A100, Colab
+peft==0.20.0                  # 2026-09-21, A100, Colab
+accelerate==1.14.0            # 2026-09-21, A100, Colab
+bitsandbytes==0.50.2          # 2026-09-21, A100, Colab
 
-peft==0.20.0
-accelerate>=1.8.0             # TODO: pip freeze로 고정
-bitsandbytes>=0.46.1          # TODO: pip freeze로 고정
-safetensors                   # TODO: pip freeze로 고정
-sentencepiece                 # TODO: pip freeze로 고정
+safetensors
+sentencepiece
 
-# torch와 torchvision은 Colab 이미지에 이미 있다. 참고 실행은 torch 2.11.0+cu128 /
+# torch와 torchvision은 Colab 이미지에 이미 있다. 2026-09-21 실행은 torch 2.11.0+cu128 /
 # torchvision 0.26.0+cu128 조합이었다. 버전을 바꿔야 하면 둘을 같은 인덱스에서 함께 받는다:
 #   pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.11.0 torchvision==0.26.0
 
 pandas==2.2.3
-pillow                        # TODO: pip freeze로 고정
-pyyaml                        # TODO: pip freeze로 고정
-tqdm                          # TODO: pip freeze로 고정
+pillow
+pyyaml
+tqdm
 
 pytest
 
-# torchao는 Colab 기본 이미지에 있으면 transformers 5.x 로딩과 충돌한 사례가 있다.
-# 참고 실행은 설치 전에 제거했다: !pip uninstall -y torchao
+# torchao는 Colab 기본 이미지에 0.10.0이 들어 있다. PEFT가 비양자화 Linear에 LoRA를 붙일 때
+# "Found an incompatible version of torchao ... only versions above 0.16.0 are supported"로
+# 실패하므로 bf16 경로에서는 반드시 먼저 제거한다: pip uninstall -y torchao
 
 # --- 데이터 감사 / 노트북 생성 ---
 ImageHash                     # scripts/audit_data.py의 phash 근접 중복 탐지. 없으면 audit이 실패한다

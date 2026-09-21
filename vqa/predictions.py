@@ -32,6 +32,15 @@ LETTERS: tuple[str, ...] = ("a", "b", "c", "d")
 PROB_COLUMNS: tuple[str, ...] = ("p_a", "p_b", "p_c", "p_d")
 PRED_COLUMNS: tuple[str, ...] = ("id", *PROB_COLUMNS, "run_id")
 
+#: 팀원 도구(infer_val.py, eval_val.py)가 쓰는 확률 컬럼 이름.
+TEAMMATE_PROB_COLUMNS: tuple[str, ...] = ("prob_a", "prob_b", "prob_c", "prob_d")
+
+#: 팀원 파일에만 있고 vqa 형식에는 없는 컬럼. alias 변환 때만 버린다.
+TEAMMATE_ONLY_COLUMNS: tuple[str, ...] = ("pred", "answer")
+
+#: run_id가 없는 팀원 파일을 읽을 때 채워 넣는 기본값.
+DEFAULT_RUN_ID = "unknown"
+
 #: 확률 합이 1에서 벗어나는 것을 허용하는 기본 오차.
 DEFAULT_TOLERANCE = 1e-3
 
@@ -214,6 +223,29 @@ def _read_raw_csv(path: str | os.PathLike[str]) -> pd.DataFrame:
     return frame
 
 
+def _apply_teammate_aliases(frame: pd.DataFrame, *, default_run_id: str) -> tuple[pd.DataFrame, bool]:
+    """팀원 형식(`id,pred,prob_a..prob_d`)을 vqa 형식으로 맞춘다.
+
+    `p_a`~`p_d`가 이미 있으면 아무것도 하지 않는다. `prob_*`만 있을 때 이름을 바꾸고,
+    `pred`처럼 팀원 도구에만 있는 컬럼을 버리고, `run_id`가 없으면 기본값으로 채운다.
+
+    Returns:
+        (변환한 DataFrame, 변환이 일어났는지 여부)
+    """
+    has_vqa = all(col in frame.columns for col in PROB_COLUMNS)
+    has_teammate = all(col in frame.columns for col in TEAMMATE_PROB_COLUMNS)
+    if has_vqa or not has_teammate:
+        return frame, False
+
+    frame = frame.rename(columns=dict(zip(TEAMMATE_PROB_COLUMNS, PROB_COLUMNS)))
+    drop = [col for col in TEAMMATE_ONLY_COLUMNS if col in frame.columns]
+    if drop:
+        frame = frame.drop(columns=drop)
+    if "run_id" not in frame.columns:
+        frame["run_id"] = pd.array([str(default_run_id)] * len(frame), dtype="string")
+    return frame, True
+
+
 def _check_columns(frame: pd.DataFrame, source: str) -> None:
     missing = [col for col in PRED_COLUMNS if col not in frame.columns]
     if missing:
@@ -234,6 +266,7 @@ def load_predictions(
     *,
     tolerance: float = DEFAULT_TOLERANCE,
     renormalize: bool = False,
+    default_run_id: str = DEFAULT_RUN_ID,
 ) -> pd.DataFrame:
     """완결된 예측 파일을 읽고 형식을 검증한다.
 
@@ -244,6 +277,7 @@ def load_predictions(
         path: 예측 CSV 경로.
         tolerance: 확률 합이 1에서 벗어나도 되는 허용 오차.
         renormalize: True면 검증 후 각 행의 확률을 합이 정확히 1이 되도록 다시 나눈다.
+        default_run_id: 팀원 형식 파일에 `run_id`가 없을 때 채워 넣을 값.
 
     Returns:
         `id, p_a, p_b, p_c, p_d, run_id` 컬럼을 이 순서로 가진 DataFrame.
@@ -253,6 +287,7 @@ def load_predictions(
     """
     source = str(path)
     frame = _read_raw_csv(path)
+    frame, _aliased = _apply_teammate_aliases(frame, default_run_id=default_run_id)
     _check_columns(frame, source)
     frame = frame.loc[:, list(PRED_COLUMNS)].copy()
 

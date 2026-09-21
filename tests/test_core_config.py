@@ -105,6 +105,18 @@ def test_config_hash_ignores_operational_keys():
         assert config_mod.config_hash(changed) == base_hash, override
 
 
+def test_tf32_defaults_to_true_and_is_outside_config_hash():
+    """TF32는 속도 설정이므로 이 값 때문에 checkpoint 재개가 거부되면 안 된다."""
+    base = config_mod.load_config(CONFIG_DIR / "lab_qwen25vl_3b.yaml")
+    assert config_mod.get_path(base, "runtime.tf32") is True
+
+    on = config_mod.load_config(CONFIG_DIR / "lab_qwen25vl_3b.yaml", ["runtime.tf32=true"])
+    off = config_mod.load_config(CONFIG_DIR / "lab_qwen25vl_3b.yaml", ["runtime.tf32=false"])
+    assert config_mod.get_path(off, "runtime.tf32") is False
+    assert config_mod.config_hash(on) == config_mod.config_hash(off)
+    assert config_mod.config_hash(off) == config_mod.config_hash(base)
+
+
 def test_config_hash_is_stable_across_loads():
     first = config_mod.config_hash(config_mod.load_config(CONFIG_DIR / "lab_qwen25vl_3b.yaml"))
     second = config_mod.config_hash(config_mod.load_config(CONFIG_DIR / "lab_qwen25vl_3b.yaml"))

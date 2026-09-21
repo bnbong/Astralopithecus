@@ -88,7 +88,7 @@ MODEL_ROOT_P = _setenv("VQA_MODEL_ROOT", MODEL_ROOT)
 PY = sys.executable
 
 
-def run(cmd, check=True, echo=True, quiet=False):
+def run(cmd, check=True, echo=True, quiet=False, hint=True):
     """명령을 실행하면서 출력을 그대로 보여 주고 종료 코드와 소요 시간을 돌려줍니다."""
     if isinstance(cmd, str):
         cmd = shlex.split(cmd)
@@ -110,7 +110,8 @@ def run(cmd, check=True, echo=True, quiet=False):
     dt = time.time() - t0
     print("[rc=%d] %.1f초" % (rc, dt), flush=True)
     if rc != 0:
-        print("실패했습니다. 같은 명령에 --help 를 붙여서 인자 이름부터 확인하십시오.", flush=True)
+        if hint:
+            print("실패했습니다. 같은 명령에 --help 를 붙여서 인자 이름부터 확인하십시오.", flush=True)
         if check:
             raise RuntimeError("명령이 실패했습니다: " + " ".join(cmd))
     return {"rc": rc, "seconds": dt, "output": "".join(buf)}
@@ -328,6 +329,67 @@ with _code_version_path.open("a", encoding="utf-8") as _fh:
                             CODE_VERSION or "(알 수 없음)"))
 print("코드 버전을 기록했습니다: %s -> %s" % (_code_version_path, CODE_VERSION))
 '''
+
+# 20번과 21번이 그대로 공유하는 설치 셀입니다. 여러 번 실행해도 결과가 같습니다.
+ENV_SETUP = r'''
+# --- 환경 설치와 확인 (20번 노트북과 21번 노트북이 같은 셀을 씁니다) ---
+# Colab은 노트북마다 가상 머신을 따로 배정합니다. 20번에서 설치를 끝냈더라도 21번 가상 머신에는
+# 아무것도 깔려 있지 않으므로, 새 가상 머신을 받을 때마다 이 셀을 처음부터 다시 실행해야 합니다.
+REQ = "requirements/colab.txt"
+if not Path(REQ).exists():
+    raise RuntimeError(REQ + " 이 없습니다. 코드 가져오기 셀이 제대로 끝났는지 먼저 확인하십시오.")
+
+# Colab 기본 이미지에는 torchao 0.10.0이 들어 있습니다. PEFT가 비양자화 Linear에 LoRA를 붙일 때
+# 이 버전과 충돌해서 실패하므로 bf16 경로에서는 반드시 먼저 지웁니다. 설치되어 있지 않으면
+# 아무 일도 일어나지 않습니다.
+run([PY, "-m", "pip", "uninstall", "-y", "torchao"], check=False, quiet=True)
+
+_install = run([PY, "-m", "pip", "install", "-q", "-r", REQ], check=False)
+if _install["rc"] != 0:
+    raise RuntimeError(
+        "requirements/colab.txt 설치가 실패했습니다. 위 출력에서 어느 패키지가 막혔는지 확인한 다음 "
+        "이 셀을 다시 실행하십시오."
+    )
+
+# 점검은 반드시 별도 프로세스에서 수행합니다. 지금 커널은 예전 버전을 이미 import 해 두었을 수
+# 있고, 그러면 화면에는 옛 버전이 그대로 찍혀서 문제를 놓치게 됩니다.
+_ENV_CHECK_SRC = """
+import importlib
+import torch
+
+print("torch                :", torch.__version__)
+print("torch.cuda.available :", torch.cuda.is_available())
+if torch.cuda.is_available():
+    _props = torch.cuda.get_device_properties(0)
+    print("gpu                  :", _props.name)
+    print("vram_gb              : %.1f" % (_props.total_memory / 1024 ** 3))
+for _name in ("bitsandbytes", "transformers", "peft", "accelerate"):
+    _mod = importlib.import_module(_name)
+    print("%-21s: %s" % (_name, getattr(_mod, "__version__", "(버전 정보 없음)")))
+try:
+    import torchao
+except ImportError:
+    print("torchao              : 설치되어 있지 않습니다 (정상)")
+else:
+    raise AssertionError(
+        "torchao가 아직 설치되어 있습니다(%s). PEFT가 bf16 LoRA를 붙일 때 실패합니다. "
+        "pip uninstall -y torchao 를 다시 실행한 다음 런타임을 재시작하십시오."
+        % getattr(torchao, "__version__", "버전 미상")
+    )
+if not torch.cuda.is_available():
+    raise AssertionError("CUDA를 쓸 수 없습니다. 런타임 유형이 GPU인지 확인하십시오.")
+print("환경 확인을 통과했습니다.")
+"""
+
+_verify = run([PY, "-c", _ENV_CHECK_SRC], check=False, echo=False)
+if _verify["rc"] != 0:
+    raise RuntimeError(
+        "환경 확인이 실패했습니다. 바로 위 메시지를 그대로 읽고 원인을 해결한 다음 이 셀을 다시 "
+        "실행하십시오. torchao가 남아 있다는 메시지가 보이면 런타임을 재시작하고 이 셀부터 다시 "
+        "실행하면 됩니다."
+    )
+'''
+
 
 # 압축 해제 부분만 공유합니다. 확인 출력은 노트북마다 따로 붙입니다.
 DATA_STAGE = r'''
@@ -611,20 +673,23 @@ print("\n".join(lines))
 def nb_01():
     cells = []
     cells.append(md("""
-# 01. 데이터 검사와 고정 split 만들기
+# 01. 데이터 검사와 공식 split 확정
 
 담당: 수빈
-목표: CSV와 이미지를 검사하고, 근접 중복 후보를 사람이 직접 확인한 다음, 팀 전체가 공유할 고정
-validation split을 만들어 내용 해시와 함께 배포하는 것입니다.
+목표: CSV와 이미지를 검사하고, 근접 중복 후보를 사람이 직접 확인한 다음, 팀 공식 분할 파일을
+vqa가 읽는 형식으로 바꿔서 내용 해시와 함께 배포하는 것입니다.
 
-이 split이 확정되어야 창혁의 프롬프트 비교와 유림의 학습이 시작될 수 있습니다. 계획서 기준으로
-G1 게이트에 해당하므로, 다른 사람이 기다리고 있다는 점을 염두에 두고 진행하십시오.
+공식 분할은 팀이 이미 확정했습니다. 검증은 `fold_csv_files/val_fold0.csv`의 fold 0 1,344문항이고,
+학습은 `fold_csv_files/train_fold1234.csv`의 5,358문항입니다. 학습 파일에서는 test와 이미지가
+동일한 train 24문항을 빼 두었습니다. 분할 방식은 `fold_csv_files/데이터처리_검증분할.md`에
+정리되어 있습니다. 이 노트북은 그 두 파일을 `artifacts/data/split_fold0.json` 하나로 합칩니다.
+검증 500문항을 쓰던 `split_v1.json`은 폐기했으니 새 실행에서는 쓰지 마십시오.
 
 ## 통과 기준(PASS)
 1. `scripts/audit_data.py` 가 종료 코드 0으로 끝나고, 경로 누락과 손상 이미지가 0건입니다.
 2. 근접 중복 후보를 사람이 눈으로 확인해서 같은 장면인지 여부를 기록했습니다.
-3. val 문항 수가 300에서 500 사이이고, 정답 a~d 분포가 한쪽으로 크게 치우치지 않습니다.
-4. train_ids와 val_ids가 서로 겹치지 않고, 그룹이 양쪽으로 쪼개지지 않았습니다.
+3. `scripts/folds_to_split.py` 가 val 1,344문항과 train 5,358문항을 겹침 없이 기록했습니다.
+4. 정답 a~d 분포가 한쪽으로 크게 치우치지 않았습니다.
 
 ## 넘겨줄 내용
 마지막 셀이 출력하는 split 해시 블록을 팀 채널에 공유합니다. 전원이 같은 split을 쓰는지 확인하는
@@ -644,9 +709,9 @@ MODEL_ROOT = r""
 OUT_DIR = "artifacts/data"
 AUDIT_REPORT = "artifacts/data/audit_report.json"
 PAIRS_CSV = "artifacts/data/near_duplicate_pairs.csv"
-SPLIT_OUT = "artifacts/data/split_v1.json"
-VAL_SIZE = 500          # 계획서의 300~500 목표 범위 안에서 정한 값이며, 고정 split과 같습니다.
-SEED = 20250921
+FOLD_DIR = "fold_csv_files"                      # 팀 공식 분할 CSV가 있는 폴더
+SPLIT_OUT = "artifacts/data/split_fold0.json"    # 위 CSV 두 개를 합쳐서 만드는 공식 split
+VAL_IDS_OUT = "artifacts/data/val_fold0_ids.txt"
 PHASH_THRESHOLD = 8     # 근접 중복 판정에 쓸 perceptual hash 거리 상한
 DUP_PAIRS_TO_SHOW = 24  # 한 번에 눈으로 확인할 근접 중복 후보 쌍의 개수
 ''', parameters=True))
@@ -757,22 +822,23 @@ print("--threshold 값을 조정해서 다시 실행하는 방식으로 반영�
 '''))
 
     cells.append(md("""
-## 3. 고정 split 생성
+## 3. 공식 split 파일 만들기
 
-그룹 분리를 먼저 지키고, 그 범위 안에서 정답 분포를 맞춥니다. 같은 인자로 두 번 실행하면 같은
-결과가 나오므로, 값을 바꿔 가면서 val 크기를 조정해도 됩니다.
+팀 공식 분할은 이미 확정되어 있습니다. 이 셀은 새로 나누지 않고, `fold_csv_files/`의 CSV 두
+개를 읽어서 `vqa.train --split` 이 읽는 JSON 하나로 옮겨 적습니다. 학습 id와 검증 id가 하나라도
+겹치면 스크립트가 실패하면서 멈춥니다.
 
-`split_v1.json` 과 함께 `train_ids.txt`, `val_ids.txt`, `split_leakage.csv` 가 만들어집니다.
-누수 파일에 행이 남아 있으면 그 내용을 먼저 확인해야 합니다.
+이 분할은 이미지 MD5를 그룹 키로 쓰는 StratifiedGroupKFold 결과입니다. 픽셀이 조금 다른 근접
+중복 이미지까지 묶지는 않기 때문에, fold 0과 학습 분할에 걸쳐 있는 유사 이미지가 한 쌍
+남아 있습니다. `train_0395.jpg`와 `train_4458.jpg`이며, perceptual hash로만 일치합니다. 문항
+수로 따지면 영향이 무시할 만한 수준이라서 그대로 둡니다.
 """))
 
     cells.append(code(r'''
-script("make_split.py",
+script("folds_to_split.py",
+       "--fold-dir", FOLD_DIR,
        "--data-root", os.environ["VQA_DATA_ROOT"],
-       "--out-dir", OUT_DIR,
-       "--val-size", VAL_SIZE,
-       "--seed", SEED,
-       "--threshold", PHASH_THRESHOLD)
+       "--out-dir", OUT_DIR)
 
 SPLIT = json.loads(Path(SPLIT_OUT).read_text(encoding="utf-8"))
 train_ids = SPLIT["train_ids"]
@@ -781,12 +847,13 @@ print()
 print("train %d개 / val %d개" % (len(train_ids), len(val_ids)))
 overlap = set(train_ids) & set(val_ids)
 print("겹치는 ID: %d개 (0이어야 합니다)" % len(overlap))
-assert not overlap, "train과 val이 겹칩니다. split 생성 조건을 다시 확인하십시오."
+assert not overlap, "train과 val이 겹칩니다. fold CSV를 다시 확인하십시오."
+print("검증 id 목록:", VAL_IDS_OUT, "존재:", Path(VAL_IDS_OUT).exists())
 
 leak_path = Path(OUT_DIR) / "split_leakage.csv"
 if leak_path.exists():
     leaks = read_csv_rows(leak_path)
-    print("누수 검사 결과: %d행" % len(leaks))
+    print("참고용 누수 검사 결과(감사 산출물): %d행" % len(leaks))
     for r in leaks[:10]:
         print("  ", json.dumps(r, ensure_ascii=False)[:160])
 '''))
@@ -895,8 +962,9 @@ MODEL_ROOT = r""
 MODEL_CHOICE = "qwen25vl_3b"   # "qwen25vl_3b" | "qwen35_4b" | "qwen35_9b"
 RUN_ID = "lab_zeroshot_v1"     # 모델을 바꾸면 RUN_ID도 함께 바꾸십시오.
 
-VAL_IDS_FILE = "artifacts/data/val_ids.txt"
-SPLIT_FILE = "artifacts/data/split_v1.json"
+VAL_IDS_FILE = "fold_csv_files/val_fold0.csv"    # 팀 공식 검증 분할 (fold 0, 1,344문항)
+SPLIT_FILE = "artifacts/data/split_fold0.json"   # 팀 공식 학습 분할 (train_fold1234, 5,358문항)
+VAL_OUT_NAME = "fold0_base"
 TEST_CSV = "test.csv"
 N_TEST_ITEMS = 6714            # 전체 test 문항 수
 
@@ -936,7 +1004,7 @@ vqa("predict",
     "--csv", "train.csv",
     "--ids-file", VAL_IDS_FILE,
     "--adapter", "none",
-    "--out-name", "val_base")
+    "--out-name", VAL_OUT_NAME)
 '''))
 
     cells.append(md("""
@@ -949,11 +1017,11 @@ vqa("predict",
     cells.append(code(r'''
 Path("artifacts/eval").mkdir(parents=True, exist_ok=True)
 script("evaluate_run.py",
-       "--pred", str(PRED_DIR / "val_base.csv"),
+       "--pred", str(PRED_DIR / (VAL_OUT_NAME + ".csv")),
        "--gold", str(Path(os.environ["VQA_DATA_ROOT"]) / "train.csv"),
        "--val-ids", VAL_IDS_FILE,
-       "--json-out", "artifacts/eval/%s_val_base.json" % RUN_ID,
-       "--wrong-out", "artifacts/eval/%s_val_base_wrong.csv" % RUN_ID,
+       "--json-out", "artifacts/eval/%s_%s.json" % (RUN_ID, VAL_OUT_NAME),
+       "--wrong-out", "artifacts/eval/%s_%s_wrong.csv" % (RUN_ID, VAL_OUT_NAME),
        "--note", "zero-shot %s" % MODEL_CHOICE)
 '''))
 
@@ -1080,8 +1148,9 @@ def nb_11():
 두 가지로만 제한합니다. 후보를 늘리면 시간이 부족해지고 표본에 과적합될 위험이 커집니다.
 
 ## 선행 조건
-수빈의 01번 노트북이 끝나서 `artifacts/data/split_v1.json` 이 존재해야 합니다. 개발 표본은 반드시
-train ID에서만 뽑습니다. validation에서 뽑으면 이후의 모든 정확도 비교가 오염됩니다.
+수빈의 01번 노트북이 끝나서 `artifacts/data/split_fold0.json` 이 존재해야 합니다. 개발 표본은 반드시
+`train_fold1234` 의 학습 ID에서만 뽑습니다. fold 0에서 뽑으면 이후의 모든 정확도 비교가 오염됩니다.
+아래 셀은 fold 0과 겹치는 ID가 하나라도 있으면 멈춥니다.
 
 ## 통과 기준(PASS)
 1. 대표 이미지 20장 정도를 실제로 눈으로 확인했습니다.
@@ -1103,7 +1172,7 @@ RUN_ROOT = r"./artifacts/runs"
 LOCAL_SCRATCH = r"./artifacts/scratch"
 MODEL_ROOT = r""
 
-SPLIT_FILE = "artifacts/data/split_v1.json"
+SPLIT_FILE = "artifacts/data/split_fold0.json"
 DEV_SAMPLE_FILE = "artifacts/data/prompt_dev_128.txt"
 DEV_SAMPLE_N = 128
 SAMPLE_SEED = 20260921
@@ -1367,8 +1436,9 @@ LOCAL_SCRATCH = r"./artifacts/scratch"
 MODEL_ROOT = r""
 
 CONFIG = "configs/lab_qwen35_9b.yaml"
-SPLIT_FILE = "artifacts/data/split_v1.json"
-VAL_IDS_FILE = "artifacts/data/val_ids.txt"
+SPLIT_FILE = "artifacts/data/split_fold0.json"   # 팀 공식 학습 분할 (train_fold1234, 5,358문항)
+VAL_IDS_FILE = "fold_csv_files/val_fold0.csv"    # 팀 공식 검증 분할 (fold 0, 1,344문항)
+VAL_OUT_NAME = "fold0_ft"
 FROZEN_INPUT = "artifacts/input_config_frozen.json"
 FROZEN_KEY = "lab_qwen35_9b"
 
@@ -1611,16 +1681,16 @@ vqa("predict",
     "--csv", "train.csv",
     "--ids-file", VAL_IDS_FILE,
     "--adapter", str(ADAPTER),
-    "--out-name", "val_ft",
+    "--out-name", VAL_OUT_NAME,
     *OVERRIDES)
 
 Path("artifacts/eval").mkdir(parents=True, exist_ok=True)
 script("evaluate_run.py",
-       "--pred", str(RUN_ROOT_P / TRAIN_RUN_ID / "preds" / "val_ft.csv"),
+       "--pred", str(RUN_ROOT_P / TRAIN_RUN_ID / "preds" / (VAL_OUT_NAME + ".csv")),
        "--gold", str(Path(os.environ["VQA_DATA_ROOT"]) / "train.csv"),
        "--val-ids", VAL_IDS_FILE,
-       "--json-out", "artifacts/eval/%s_val_ft.json" % TRAIN_RUN_ID,
-       "--wrong-out", "artifacts/eval/%s_val_ft_wrong.csv" % TRAIN_RUN_ID,
+       "--json-out", "artifacts/eval/%s_%s.json" % (TRAIN_RUN_ID, VAL_OUT_NAME),
+       "--wrong-out", "artifacts/eval/%s_%s_wrong.csv" % (TRAIN_RUN_ID, VAL_OUT_NAME),
        "--note", "9B QLoRA 미세조정 후 validation")
 '''))
 
@@ -1709,18 +1779,24 @@ RUN_ROOT = "/content/drive/MyDrive/vqa/runs"      # checkpoint가 남을 영속 
 MODEL_ROOT = ""                                   # 아래 셀에서 정해집니다.
 
 MODEL_ID = "Qwen/Qwen3.5-27B"
-MODEL_REVISION = "main"                           # 실제 commit 해시로 고정하는 편이 좋습니다.
+# 2026-09-21 Colab A100에서 받은 스냅샷 커밋입니다. configs/colab_qwen35_27b_*.yaml의 revision과
+# 같은 값을 씁니다.
+MODEL_REVISION = "fc05daec18b0a78c049392ed2e771dde82bdf654"
 
 # 수동으로 확인해서 적는 값입니다. Colab에는 잔여 CU를 조회하는 API가 없습니다.
 CU_REMAINING = 600.0        # 계정 화면에서 본 잔여 compute unit
 CU_PER_HOUR = 0.0           # 계정 화면에서 본 현재 GPU의 시간당 소모량. 모르면 0으로 두십시오.
 CU_EXPIRY = "미확인"         # 만료일
 
+SPLIT_FILE = "artifacts/data/split_fold0.json"   # 팀 공식 분할 (fold 0 검증)
 N_TEST_ITEMS = 6714
-N_VAL_ITEMS = 500           # 고정 split의 val 문항 수. split 파일이 있으면 아래에서 덮어씁니다.
-N_TRAIN_SAMPLES = 6214      # 고정 split의 train 표본 수. split 파일이 있으면 아래에서 덮어씁니다.
+N_VAL_ITEMS = 1344          # fold 0 검증 문항 수. split 파일이 있으면 아래에서 덮어씁니다.
+N_TRAIN_SAMPLES = 5358      # train_fold1234 표본 수. split 파일이 있으면 아래에서 덮어씁니다.
 MICRO_BATCH = 1
 GRAD_ACCUM = 8
+
+# 정밀도 정책입니다. 팀 결정은 bf16이며, "auto"는 VRAM만 보고 고르고 "nf4"는 항상 nf4를 씁니다.
+PRECISION_POLICY = "bf16"
 ''', parameters=True))
 
     cells.append(md("""
@@ -1762,7 +1838,7 @@ print("Drive를 연결했습니다.")
     cells.append(code(CODE_VERSION_LOG + r'''
 
 # --- 고정 split이 있으면 표본 수를 실제 값으로 맞춥니다 ---
-_split_path = Path("artifacts/data/split_v1.json")
+_split_path = Path(SPLIT_FILE)
 if _split_path.exists():
     _split = json.loads(_split_path.read_text(encoding="utf-8"))
     N_TRAIN_SAMPLES = len(_split["train_ids"])
@@ -1877,17 +1953,19 @@ print("VQA_DATA_ROOT:", os.environ["VQA_DATA_ROOT"])
     cells.append(md("""
 ## 5. 라이브러리 설치와 버전 고정
 
+`requirements/colab.txt`에 고정된 버전을 설치한 다음, 별도 프로세스에서 실제로 import 해 보고
+버전과 GPU를 확인합니다. 지금 커널이 예전 버전을 이미 import 해 두었을 수 있어서, 같은 커널
+안에서 확인하면 옛 버전이 그대로 보이기 때문입니다.
+
+Colab 기본 이미지에 들어 있는 torchao 0.10.0은 PEFT가 bf16 Linear에 LoRA를 붙일 때 충돌하므로
+설치 전에 제거합니다. 21번 노트북은 가상 머신이 다르기 때문에 같은 셀을 거기에서도 다시
+실행해야 합니다.
+
 설치가 끝나면 곧바로 `pip freeze` 결과를 Drive에 저장합니다. 가상 머신이 재활용되어도 같은
 환경을 다시 만들 수 있어야 하기 때문입니다.
 """))
 
-    cells.append(code(r'''
-REQ = "requirements/colab.txt"
-if Path(REQ).exists():
-    run([PY, "-m", "pip", "install", "-q", "-r", REQ])
-else:
-    print(REQ + " 이 없습니다. 코어 담당자의 커밋을 기다렸다가 다시 실행하십시오.")
-'''))
+    cells.append(code(ENV_SETUP))
 
     cells.append(code(r'''
 freeze = run([PY, "-m", "pip", "freeze"], quiet=True)
@@ -1970,7 +2048,7 @@ if dl["rc"] != 0:
     cells.append(md("""
 ## 7. VRAM으로 config 고르기
 
-계획서 2절의 기준을 그대로 적용합니다.
+이 노트북은 지금 배정받은 GPU 기준으로 설정을 고릅니다.
 
 | 감지된 VRAM | 사용할 설정 |
 |---|---|
@@ -1980,6 +2058,10 @@ if dl["rc"] != 0:
 
 세 번째 경우에는 아래 셀이 오류를 내면서 멈춥니다. 그때는 팀에 알리고 실습실 9B 경로에
 인력을 더 투입해야 합니다.
+
+여기에서 고른 값은 이 가상 머신에서 측정할 때만 쓰는 값입니다. 21번 노트북은 자기 가상 머신의
+VRAM을 다시 재고 `PRECISION_POLICY`를 함께 보기 때문에, 40GB에서 고른 nf4가 80GB 가상 머신에
+그대로 따라가지 않습니다. 그래서 아래 셀은 감지한 VRAM과 정책도 함께 기록합니다.
 """))
 
     cells.append(code(r'''
@@ -1998,15 +2080,20 @@ else:
 
 print("감지된 VRAM %.1fGB -> %s (%s)" % (vram, CONFIG, PRECISION))
 print("config 존재:", Path(CONFIG).exists())
+if PRECISION_POLICY == "bf16" and PRECISION != "bf16":
+    print("팀 정책은 bf16입니다. 이 가상 머신에서는 VRAM이 모자라 nf4로 측정합니다.")
+    print("본 실행은 80GB A100을 받은 뒤에 21번 노트북에서 시작하십시오.")
 
-# 21번 노트북이 같은 config를 그대로 쓰도록 선택 결과를 남깁니다.
+# 21번 노트북이 판단할 때 참고하도록 선택 결과와 근거를 함께 남깁니다.
 COLAB_CHOICE = {
     "config": CONFIG,
     "precision": PRECISION,
+    "policy": PRECISION_POLICY,
     "vram_gb": vram,
     "gpu_name": RESOURCES.get("gpu_name"),
     "code_version": CODE_VERSION,
     "decided_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    "note": "이 값은 위 VRAM에서 고른 것입니다. 21번 노트북은 자기 가상 머신에서 다시 고릅니다.",
 }
 (RUN_ROOT_P / "colab_choice.json").write_text(
     json.dumps(COLAB_CHOICE, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2023,6 +2110,10 @@ microbatch입니다. preflight는 먼저 가장 긴 표본 몇 개로 OOM을 보
 
 출력에서 `sec_per_microbatch_mean`(초/microbatch)과 `sec_per_optimizer_step`(초/optimizer
 step)을 구분해서 확인하십시오. 예산 계산에 들어가는 값은 뒤쪽입니다.
+
+측정한 속도가 다른 환경에서 보고된 값보다 느리다면 아래 셀의 preflight 호출에
+`--tf32-ab` 옵션을 덧붙여서 다시 실행하십시오. 이 옵션을 지정하면 동일한 표본으로 TF32를
+끈 상태와 켠 상태의 microbatch 시간을 각각 측정하여 두 평균을 함께 출력합니다.
 """))
 
     cells.append(code(r'''
@@ -2227,9 +2318,10 @@ Pro+ 구독은 백그라운드 실행을 제공한다고 안내되어 있습니�
 브라우저를 닫았다가 돌아왔거나 연결이 끊겼다면 아래 순서대로 진행하십시오.
 
 1. 파라미터 셀과 Drive 연결 셀, 코드 가져오기 셀, 부트스트랩 셀을 실행합니다.
-2. `jobs status` 셀을 실행해서 프로세스가 살아 있는지 확인합니다.
-3. 살아 있으면 감시 셀만 실행하고 기다립니다. 추가로 할 일은 없습니다.
-4. 프로세스가 없고 `/content` 의 데이터도 사라졌다면 가상 머신이 회수된 것입니다. 데이터 준비
+2. 0-1절의 환경 설치와 확인 셀을 실행합니다. 가상 머신이 바뀌었다면 패키지가 하나도 없습니다.
+3. `jobs status` 셀을 실행해서 프로세스가 살아 있는지 확인합니다.
+4. 살아 있으면 감시 셀만 실행하고 기다립니다. 추가로 할 일은 없습니다.
+5. 프로세스가 없고 `/content` 의 데이터도 사라졌다면 가상 머신이 회수된 것입니다. 데이터 준비
    셀을 다시 실행한 다음, **원래 실행했던 시작 셀을 그대로 다시 실행합니다.** 명령을 고칠 필요는
    없습니다. Drive에 남은 checkpoint에서 이어집니다.
 """))
@@ -2250,11 +2342,15 @@ DATA_ROOT = "/content/data"
 RUN_ROOT = "/content/drive/MyDrive/vqa/runs"
 MODEL_ROOT = "/content/drive/MyDrive/vqa/hf_cache"   # model_snapshot.json이 있으면 덮어씁니다.
 
-CONFIG = "configs/colab_qwen35_27b_nf4.yaml"   # colab_choice.json이 있으면 그 값으로 덮어씁니다.
-BASE_RUN_ID = "colab27b_base_v1"
-FT_RUN_ID = "colab27b_ft_v1"
-SPLIT_FILE = "artifacts/data/split_v1.json"
-VAL_IDS_FILE = "artifacts/data/val_ids.txt"
+# 정밀도 정책입니다. 팀 결정은 bf16입니다. "auto"는 VRAM만 보고 고르고, "nf4"는 항상 nf4를 씁니다.
+PRECISION_POLICY = "bf16"
+CONFIG = "configs/colab_qwen35_27b_bf16.yaml"   # 아래 셀이 현재 GPU와 정책을 보고 다시 정합니다.
+BASE_RUN_ID = "colab27b_base_bf16"
+FT_RUN_ID = "colab27b_ft_bf16"
+SPLIT_FILE = "artifacts/data/split_fold0.json"     # 팀 공식 학습 분할 (train_fold1234, 5,358문항)
+VAL_IDS_FILE = "fold_csv_files/val_fold0.csv"      # 팀 공식 검증 분할 (fold 0, 1,344문항)
+VAL_OUT_BASE = "fold0_base"
+VAL_OUT_FT = "fold0_ft"
 N_TEST_ITEMS = 6714
 
 AUTO_RESTART = 3                  # 비정상 종료 시 다시 띄울 횟수입니다. 0이면 재시작하지 않습니다.
@@ -2312,19 +2408,91 @@ MODEL_ROOT_P.mkdir(parents=True, exist_ok=True)
 os.environ["VQA_MODEL_ROOT"] = str(MODEL_ROOT_P)
 os.environ["HF_HOME"] = str(MODEL_ROOT_P)
 
+# --- 지금 이 가상 머신의 VRAM을 직접 재서 정밀도를 정합니다 ---
+# 20번 노트북의 colab_choice.json은 그 가상 머신의 GPU로 고른 값이라서 그대로 따르지 않습니다.
+# 오늘 40GB에서 고른 nf4가 80GB 가상 머신까지 따라와서 조용히 nf4로 돌아간 사고가 있었습니다.
+BF16_CONFIG = "configs/colab_qwen35_27b_bf16.yaml"
+NF4_CONFIG = "configs/colab_qwen35_27b_nf4.yaml"
+
+VRAM_GB = 0.0
+_smi = run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+           check=False, quiet=True, echo=False)
+GPU_NAME = None
+if _smi["rc"] == 0 and _smi["output"].strip():
+    _parts = [x.strip() for x in _smi["output"].strip().splitlines()[0].split(",")]
+    GPU_NAME = _parts[0]
+    VRAM_GB = round(int(_parts[1].split()[0]) / 1024.0, 1)
+else:
+    print("nvidia-smi를 쓸 수 없습니다. 런타임 유형이 GPU인지 확인하십시오.")
+
+RUN_SUFFIX = ""
+TRAINING_ALLOWED = True
+
+if PRECISION_POLICY == "nf4":
+    CONFIG, PRECISION = NF4_CONFIG, "nf4"
+elif PRECISION_POLICY == "auto":
+    if VRAM_GB >= 70:
+        CONFIG, PRECISION = BF16_CONFIG, "bf16"
+    else:
+        CONFIG, PRECISION = NF4_CONFIG, "nf4"
+elif PRECISION_POLICY == "bf16":
+    if VRAM_GB >= 70:
+        CONFIG, PRECISION = BF16_CONFIG, "bf16"
+    else:
+        CONFIG, PRECISION = NF4_CONFIG, "nf4"
+        RUN_SUFFIX = "_nf4"
+        TRAINING_ALLOWED = False
+        print("=" * 72)
+        print("경고: 팀 정책은 bf16인데 이 GPU의 VRAM은 %.1fGB뿐입니다." % VRAM_GB)
+        print("이 가상 머신에서는 bf16 학습을 시작할 수도, 이어서 할 수도 없습니다.")
+        print("80GB A100을 받으려면 런타임을 끊고 다시 연결하십시오.")
+        print("계속 진행하면 추론만 nf4로 돌리며, run-id 뒤에 \"_nf4\"를 붙여서")
+        print("bf16 결과와 캐시가 절대 섞이지 않게 합니다.")
+        print("=" * 72)
+else:
+    raise RuntimeError(
+        "PRECISION_POLICY 는 bf16, auto, nf4 중 하나여야 합니다: %r" % (PRECISION_POLICY,))
+
+# 이 셀을 여러 번 실행해도 접미사가 겹쳐 붙지 않도록 먼저 떼어 내고 다시 붙입니다.
+def _with_suffix(run_id):
+    if run_id.endswith("_nf4"):
+        run_id = run_id[: -len("_nf4")]
+    return run_id + RUN_SUFFIX
+
+
+BASE_RUN_ID = _with_suffix(BASE_RUN_ID)
+FT_RUN_ID = _with_suffix(FT_RUN_ID)
+
+print("GPU              : %s / VRAM %.1fGB" % (GPU_NAME, VRAM_GB))
+print("정밀도 정책      : %s -> %s" % (PRECISION_POLICY, PRECISION))
+print("적용 중인 config : %s (존재: %s)" % (CONFIG, Path(CONFIG).exists()))
+print("base run-id      :", BASE_RUN_ID)
+print("ft run-id        :", FT_RUN_ID)
+print("학습 허용        :", TRAINING_ALLOWED)
+print("가중치 캐시      :", os.environ["VQA_MODEL_ROOT"])
+
 _choice_path = RUN_ROOT_P / "colab_choice.json"
 if _choice_path.exists():
     _choice = json.loads(_choice_path.read_text(encoding="utf-8"))
-    if _choice.get("config"):
-        CONFIG = _choice["config"]
-        print("20번 노트북이 고른 config를 적용합니다: %s (%s)"
-              % (CONFIG, _choice.get("precision", "정밀도 미기록")))
-else:
-    print("colab_choice.json이 없습니다. 파라미터 셀의 CONFIG를 그대로 사용합니다.")
-
-print("적용 중인 config :", CONFIG)
-print("가중치 캐시      :", os.environ["VQA_MODEL_ROOT"])
+    print("참고: 20번 노트북은 VRAM %s GB에서 %s 를 골랐습니다 (정책 %s)."
+          % (_choice.get("vram_gb"), _choice.get("config"), _choice.get("policy", "미기록")))
 '''))
+
+    cells.append(md("""
+### 0-1. 환경 설치와 확인
+
+Colab은 노트북 하나마다 가상 머신을 하나씩 따로 배정합니다. 그래서 20번 노트북에서 설치를
+끝냈더라도 이 노트북의 가상 머신에는 아무 패키지도 깔려 있지 않습니다. 오늘 27B 작업이
+`Using bitsandbytes 4-bit quantization requires bitsandbytes` 오류로 세 번 죽은 원인이 바로
+이것입니다.
+
+작업을 시작하기 전에 런타임 메뉴의 세션 관리 화면에서 다른 노트북의 세션을 반드시 종료하십시오.
+A100 두 대가 동시에 돌면 compute unit이 두 배로 빠지고, 80GB를 받을 확률도 떨어집니다. 새
+가상 머신을 받은 다음에는 0번 절을 코드 가져오기부터 데이터 준비와 설치까지 빠짐없이 실행한
+뒤에 job을 시작하십시오.
+"""))
+
+    cells.append(code(ENV_SETUP))
 
     cells.append(code(r'''
 JOB_EXTRA =["--auto-restart", str(AUTO_RESTART)] if AUTO_RESTART else []
@@ -2352,7 +2520,17 @@ def job_start(name, cmd, extra=True):
 
 
 def job_status(name):
-    return run([PY, "-m", "vqa.jobs", "status", "--name", name], check=False)
+    res = run([PY, "-m", "vqa.jobs", "status", "--name", name],
+              check=False, quiet=True, hint=False)
+    out = res["output"].strip()
+    if res["rc"] == 0:
+        print(out)
+    elif "기록 없음" in out:
+        print("job %s: 아직 시작하지 않았습니다." % name)
+    else:
+        print(out)
+        print("실패했습니다. 같은 명령에 --help 를 붙여서 인자 이름부터 확인하십시오.", flush=True)
+    return res
 
 
 print("config    :", CONFIG)
@@ -2361,9 +2539,10 @@ print("입력 설정 :", OVERRIDES or "(config 기본값)")
 '''))
 
     cells.append(md("""
-### 0-1. 현재 job 상태 확인
+### 0-2. 현재 job 상태 확인
 
-재접속했다면 이 셀부터 실행하십시오.
+재접속했다면 이 셀부터 실행하십시오. 아직 실행하지 않은 뒷부분 섹션의 job은 "아직 시작하지
+않았습니다"라고 나오는 것이 정상이니 걱정하지 않아도 됩니다.
 """))
 
     cells.append(code(r'''
@@ -2382,7 +2561,7 @@ if not data_ok:
 '''))
 
     cells.append(md("""
-### 0-2. 가상 머신이 회수된 경우의 데이터 재준비
+### 0-3. 가상 머신이 회수된 경우의 데이터 재준비
 
 이 셀을 실행한 뒤에 원래 실행했던 시작 셀을 그대로 다시 실행하면 됩니다. checkpoint는 Drive에
 남아 있으므로 학습은 저장된 step부터 이어집니다. 압축 파일에 암호가 없다면 파라미터 셀의
@@ -2467,14 +2646,16 @@ else:
 ## 2. base validation 추론
 
 학습 전 27B로 고정 validation을 추론합니다. 결합 가중치를 고를 때 쓰는 기준 확률이므로 반드시
-먼저 확보해야 합니다.
+먼저 확보해야 합니다. 진행 상황을 보려면 `python -m vqa.jobs tail --name <job 이름> --lines 20`
+을 실행하십시오. Drive에서 모델을 불러오는 데 수 분이 걸리므로 첫 진행 로그가 나오기까지 시간이
+걸릴 수 있습니다.
 """))
 
     cells.append(code(r'''
 cmd = [PY, "-m", "vqa.predict",
        "--config", CONFIG, "--run-id", BASE_RUN_ID,
        "--csv", "train.csv", "--ids-file", VAL_IDS_FILE,
-       "--adapter", "none", "--out-name", "val_base"] + OVERRIDES
+       "--adapter", "none", "--out-name", VAL_OUT_BASE] + OVERRIDES
 job_start(BASE_RUN_ID + "_val", cmd)
 '''))
 
@@ -2522,9 +2703,34 @@ else:
 
 `--resume auto` 가 기본이므로 이 셀을 여러 번 실행해도 안전합니다. 가상 머신이 회수된 뒤에도
 같은 셀을 그대로 다시 실행하면 Drive의 checkpoint에서 이어집니다.
+
+아래 셀은 시작하기 전에 두 가지를 확인합니다. 첫째로 지금 GPU가 정책이 요구하는 정밀도를
+감당하는지 보고, 둘째로 이 run이 이미 다른 정밀도로 시작된 적이 있는지를 `run_manifest.json`
+에서 확인합니다. 정밀도가 다르면 학습을 시작하지 않고 멈춥니다. 같은 run-id 아래에 bf16
+checkpoint와 nf4 checkpoint가 섞이면 이어서 하는 실행을 믿을 수 없게 되기 때문입니다.
 """))
 
     cells.append(code(r'''
+if not TRAINING_ALLOWED:
+    raise RuntimeError(
+        "현재 GPU의 VRAM이 %.1fGB이므로 bf16 학습을 시작하거나 이어서 할 수 없습니다. "
+        "런타임을 끊고 80GB A100으로 다시 연결한 다음 이 셀을 실행하십시오. "
+        "지금 이 가상 머신에서는 추론만 nf4로 돌릴 수 있습니다." % VRAM_GB
+    )
+
+# 이미 시작한 run이라면 그때 쓴 정밀도와 지금 정밀도가 같아야 합니다.
+_manifest_path = RUN_ROOT_P / FT_RUN_ID / "run_manifest.json"
+if _manifest_path.exists():
+    _manifest = json.loads(_manifest_path.read_text(encoding="utf-8"))
+    _prev = str(_manifest.get("config", {}).get("precision", "")).lower()
+    if _prev and _prev != PRECISION:
+        raise RuntimeError(
+            "run %s 은 %s 로 시작했는데 지금 설정은 %s 입니다. 정밀도가 다른 채로 이어서 하면 "
+            "checkpoint가 섞입니다. 같은 정밀도의 GPU로 다시 연결하거나, 다른 run-id를 쓰십시오.\n"
+            "기록 파일: %s" % (FT_RUN_ID, _prev, PRECISION, _manifest_path)
+        )
+    print("run %s 의 기존 정밀도 %s 와 현재 정밀도가 같습니다. 이어서 진행합니다." % (FT_RUN_ID, _prev))
+
 cmd = [PY, "-m", "vqa.train",
        "--config", CONFIG, "--run-id", FT_RUN_ID,
        "--split", SPLIT_FILE, "--resume", "auto"] + OVERRIDES
@@ -2544,7 +2750,7 @@ ADAPTER = str(RUN_ROOT_P / FT_RUN_ID / "final_adapter")
 cmd = [PY, "-m", "vqa.predict",
        "--config", CONFIG, "--run-id", FT_RUN_ID,
        "--csv", "train.csv", "--ids-file", VAL_IDS_FILE,
-       "--adapter", ADAPTER, "--out-name", "val_ft"] + ALSO_BASE_ARGS + OVERRIDES
+       "--adapter", ADAPTER, "--out-name", VAL_OUT_FT] + ALSO_BASE_ARGS + OVERRIDES
 job_start(FT_RUN_ID + "_val", cmd)
 '''))
 
@@ -2603,7 +2809,8 @@ lines = ["===== Colab 27B 실행 상태 ====="]
 lines.append("시각    : %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
 lines.append("config  : %s" % CONFIG)
 for name in JOB_NAMES:
-    res = run([PY, "-m", "vqa.jobs", "status", "--name", name], check=False, quiet=True, echo=False)
+    res = run([PY, "-m", "vqa.jobs", "status", "--name", name],
+              check=False, quiet=True, echo=False, hint=False)
     first = res["output"].strip().splitlines()
     lines.append("%-24s %s" % (name, first[0] if first else "기록 없음"))
 for run_id in (BASE_RUN_ID, FT_RUN_ID):
@@ -2650,17 +2857,17 @@ RUN_ROOT = r"./artifacts/runs"
 LOCAL_SCRATCH = r"./artifacts/scratch"
 MODEL_ROOT = r""
 
-VAL_IDS_FILE = "artifacts/data/val_ids.txt"
+VAL_IDS_FILE = "fold_csv_files/val_fold0.csv"    # 팀 공식 검증 분할 (fold 0, 1,344문항)
 FAKE_RUN_ID = "fake_smoke"
 N_FAKE_SHARDS = 2
 SEED = 7
 
 # 실제 파일로 전환할 때 여기를 고칩니다. 아직 없는 출처는 빈 문자열로 둡니다.
-REAL_VAL_BASE27 = "artifacts/runs/colab27b_base_v1/preds/val_base.csv"
-REAL_VAL_FT27 = "artifacts/runs/colab27b_ft_v1/preds/val_ft.csv"
-REAL_VAL_FT9 = "artifacts/runs/lab9b_ft_v1/preds/val_ft.csv"
-REAL_TEST_BASE27 = "artifacts/runs/colab27b_base_v1/preds/test_base.csv"
-REAL_TEST_FT27 = "artifacts/runs/colab27b_ft_v1/preds/test_ft.csv"
+REAL_VAL_BASE27 = "artifacts/runs/colab27b_base_bf16/preds/fold0_base.csv"
+REAL_VAL_FT27 = "artifacts/runs/colab27b_ft_bf16/preds/fold0_ft.csv"
+REAL_VAL_FT9 = "artifacts/runs/lab9b_ft_v1/preds/fold0_ft.csv"
+REAL_TEST_BASE27 = "artifacts/runs/colab27b_base_bf16/preds/test_base.csv"
+REAL_TEST_FT27 = "artifacts/runs/colab27b_ft_bf16/preds/test_ft.csv"
 REAL_TEST_FT9 = "artifacts/runs/lab9b_ft_v1/preds/test_ft.csv"
 TIE_EPSILON = 0.002   # 정확도 차이가 이 값 이하면 더 단순한 후보를 고릅니다.
 
@@ -2689,7 +2896,7 @@ TEST_CSV = str(Path(os.environ["VQA_DATA_ROOT"]) / "test.csv")
 
 if not Path(VAL_IDS_FILE).exists():
     raise FileNotFoundError(
-        VAL_IDS_FILE + " 이 없습니다. 수빈의 01번 노트북이 끝나기 전에는 "
+        VAL_IDS_FILE + " 이 없습니다. 저장소의 fold_csv_files/ 가 최신인지 확인하기 전에는 "
         "train.csv의 id 컬럼을 --ids로 넘겨서 형식만 확인하십시오."
     )
 

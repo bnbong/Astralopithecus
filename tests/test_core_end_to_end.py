@@ -366,3 +366,45 @@ def test_train_cli_writes_manifest_and_exits_zero_when_finished(tiny_available, 
     # 두 번째 실행은 모델을 로드하지도 않고 바로 끝난다.
     assert train_mod.main(argv) == 0
     assert "이미 끝난 run" in capsys.readouterr().out
+
+
+def test_preflight_lora_targets_passes_after_peft_wrapping(tiny_available, dataset):
+    """비양자화(bf16/fp32) 경로에서 PEFT로 감싼 뒤에도 lora_targets 검사가 PASS여야 한다.
+
+    감싸고 나면 leaf 클래스가 `peft.tuners.lora.layer.Linear`로 바뀌기 때문에, 감싼 모델에서
+    다시 탐지하면 target이 0개가 된다. nf4에서는 bnb 래퍼 클래스 이름이 `Linear4bit`이라
+    우연히 통과했지만 bf16에서는 그대로 FAIL이 났다. 검사는 감싸기 전에 탐지해 둔
+    `backend.targets`를 써야 한다.
+    """
+    from vqa import modeling
+    from vqa import preflight as preflight_mod
+
+    cfg = tiny_cfg()
+    assert config_mod.get_path(cfg, "precision") == "bf16"
+    backend, _ = build_backend(cfg, dataset)
+
+    # 감싼 모델에서 다시 탐지하면 실제로 0개가 나온다. 이것이 예전 FAIL의 원인이었다.
+    assert modeling.detect_lora_targets(backend.model).names == []
+
+    result, used = preflight_mod.check_lora_targets(backend.model, cfg, backend.targets)
+    assert result.status == preflight_mod.PASS, result.as_dict()
+    assert used is backend.targets
+    assert result.detail["num_modules"] == len(backend.targets.names) > 0
+    assert result.detail["num_attached"] == len(backend.targets.names)
+    assert result.detail["attached_vision"] == []
+    assert result.detail["targets_source"].startswith("backend.targets")
+
+
+def test_preflight_lora_targets_fails_when_nothing_is_attached(tiny_available, dataset):
+    """target 목록은 있는데 adapter가 하나도 붙지 않았다면 FAIL이어야 한다."""
+    from vqa import modeling
+    from vqa import preflight as preflight_mod
+
+    cfg = tiny_cfg()
+    base, _ = modeling.load_base_model(cfg, for_training=False)
+    targets = modeling.detect_lora_targets(base)
+    assert targets.names
+
+    result, _ = preflight_mod.check_lora_targets(base, cfg, targets)
+    assert result.status == preflight_mod.FAIL
+    assert "LoRA가 붙은 모듈 0개" in result.reason
