@@ -11,11 +11,13 @@ tokenizer, thinking이 켜진 채로 나가는 chat template, vision까지 잡�
 from __future__ import annotations
 
 import argparse
+import contextlib
+import logging
 import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 from . import collator as collator_mod
 from . import config as config_mod
@@ -286,15 +288,72 @@ def check_prefix_match(
     )
 
 
-def check_lora_targets(model: Any, cfg: dict[str, Any]) -> tuple[CheckResult, Any]:
+def attached_lora_modules(model: Any) -> list[str]:
+    """PEFT로 감싼 모델에서 실제로 LoRA가 붙은 모듈의 전체 경로를 돌려준다.
+
+    `lora_A` 속성을 가진 모듈이 adapter가 붙은 자리다. 감싼 뒤의 leaf 클래스는
+    `torch.nn.Linear`가 아니라 `peft.tuners.lora.layer.Linear`(bf16)나
+    `Linear4bit`(nf4)이므로 클래스 이름으로 판정하지 않는다.
+    """
+    names = []
+    for name, module in model.named_modules():
+        if not name:
+            continue
+        if hasattr(module, "lora_A"):
+            names.append(name)
+    return names
+
+
+def check_lora_targets(model: Any, cfg: dict[str, Any], targets: Any = None) -> tuple[CheckResult, Any]:
+    """LoRA target 점검.
+
+    target 목록은 **PEFT로 감싸기 전에** 탐지한 값(`backend.targets`)을 쓴다. 감싼 뒤의
+    모델에서 다시 탐지하면 leaf가 `peft.tuners.lora.layer.Linear`로 바뀌어 있어
+    bf16에서는 0개가 나온다. 그 다음 감싼 모델에서 실제로 adapter가 붙은 개수가
+    target 수와 같은지, vision 경로에 붙은 것이 없는지를 확인한다.
+    """
     from . import modeling
 
     configured = config_mod.get_path(cfg, "lora.targets", "auto")
     explicit = None if configured == "auto" else list(configured)
-    targets = modeling.detect_lora_targets(model, explicit_leaves=explicit)
+
+    source = "backend.targets (감싸기 전)"
+    if targets is None or not getattr(targets, "names", None):
+        # backend가 값을 넘겨 주지 않은 경우에만 직접 탐지한다. 감싸지 않은 base 모델이어야 한다.
+        targets = modeling.detect_lora_targets(model, explicit_leaves=explicit)
+        source = "감싸지 않은 base 모델에서 재탐지"
+
     detail = targets.as_dict()
+    detail["targets_source"] = source
     if not targets.names:
         return CheckResult("lora_targets", FAIL, "language backbone에서 target을 찾지 못했습니다.", detail), targets
+
+    attached = attached_lora_modules(model)
+    vision_attached = sorted({name for name in attached if modeling._is_vision_path(name)})
+    detail["num_attached"] = len(attached)
+    detail["attached_sample"] = attached[:8]
+    detail["attached_vision"] = vision_attached
+
+    if vision_attached:
+        return (
+            CheckResult(
+                "lora_targets",
+                FAIL,
+                f"vision 경로에 LoRA가 붙었습니다: {vision_attached[:3]}",
+                detail,
+            ),
+            targets,
+        )
+    if len(attached) != len(targets.names):
+        return (
+            CheckResult(
+                "lora_targets",
+                FAIL,
+                f"LoRA가 붙은 모듈 {len(attached)}개가 target {len(targets.names)}개와 다릅니다.",
+                detail,
+            ),
+            targets,
+        )
     if len(targets.leaf_names) < 4:
         return (
             CheckResult(
@@ -307,13 +366,21 @@ def check_lora_targets(model: Any, cfg: dict[str, Any]) -> tuple[CheckResult, An
         )
     reason = (
         f"language 모듈 {len(targets.names)}개, leaf {targets.leaf_names}, "
-        f"vision 제외 {len(targets.excluded_vision)}개"
+        f"vision 제외 {len(targets.excluded_vision)}개, 실제 부착 {len(attached)}개"
     )
     return CheckResult("lora_targets", PASS, reason, detail), targets
 
 
 #: 시간 측정에 쓰는 microbatch 개수의 기본 상한.
 DEFAULT_MAX_TIMING_MICROBATCHES = 64
+
+#: --tf32-ab에서 한쪽(off 또는 on)마다 재는 microbatch 개수와 그 앞에 버리는 warm-up 개수.
+TF32_AB_MICROBATCHES = 8
+TF32_AB_WARMUPS = 2
+
+
+def _mean(values: Sequence[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
 
 
 def check_forward_backward(
@@ -325,12 +392,19 @@ def check_forward_backward(
     max_timing_microbatches: int = DEFAULT_MAX_TIMING_MICROBATCHES,
     n_longest: int = 4,
     seed: int = 0,
+    tf32_ab: bool = False,
+    tf32_enabled: bool = True,
 ) -> CheckResult:
     """OOM은 가장 긴 표본으로, 속도는 무작위 표본으로 따로 본다.
 
     한 번의 forward+backward는 **microbatch 하나**다. optimizer step 하나는
     grad_accum개의 microbatch이므로 예산 계산에는 `sec_per_optimizer_step`을 써야
     한다. 가장 긴 표본만으로 잰 시간은 상한이라 평균 대신 쓰면 안 된다.
+
+    시간은 CPU 준비 구간(make_micro_batch: 이미지 디코딩, processor, 템플릿)과 GPU
+    구간(forward+backward)으로 나누어 잰다. 둘 중 어느 쪽이 병목인지 모르면 속도
+    차이를 GPU 설정 탓으로만 돌리기 쉽다. `sec_per_microbatch_mean`은 예전과 같이
+    두 구간의 합이다.
     """
     import random
 
@@ -350,16 +424,20 @@ def check_forward_backward(
 
     params = backend.trainable_parameters()
 
-    def run_one(record: collator_mod.VQARecord) -> tuple[float, float]:
+    def run_one(record: collator_mod.VQARecord) -> tuple[float, float, float]:
+        """(준비 초, 계산 초, loss). CUDA가 있으면 계산 구간 끝에서 동기화한다."""
         started = time.time()
         batch = backend.make_micro_batch([record.id], 0)
+        prepared = time.time()
         loss = backend.compute_loss(batch)
         if not bool(torch.isfinite(loss)):
             raise RuntimeError(f"{record.id}: loss가 유한하지 않습니다.")
         loss.backward()
+        runtime.cuda_sync()
+        computed = time.time()
         for param in params:
             param.grad = None
-        return time.time() - started, float(loss.detach())
+        return prepared - started, computed - prepared, float(loss.detach())
 
     runtime.reset_peak_vram()
 
@@ -368,8 +446,8 @@ def check_forward_backward(
     losses: list[float] = []
     try:
         for record in longest:
-            seconds, loss_value = run_one(record)
-            longest_timings.append(seconds)
+            prepare, compute, loss_value = run_one(record)
+            longest_timings.append(prepare + compute)
             losses.append(loss_value)
     except RuntimeError as exc:
         return CheckResult("forward_backward", FAIL, str(exc))
@@ -377,17 +455,21 @@ def check_forward_backward(
 
     # (b) 무작위 표본으로 대표 속도를 잰다.
     timing_seconds: list[float] = []
+    prepare_seconds: list[float] = []
+    compute_seconds: list[float] = []
     try:
         for record in sampled:
-            seconds, loss_value = run_one(record)
-            timing_seconds.append(seconds)
+            prepare, compute, loss_value = run_one(record)
+            timing_seconds.append(prepare + compute)
+            prepare_seconds.append(prepare)
+            compute_seconds.append(compute)
             losses.append(loss_value)
     except RuntimeError as exc:
         return CheckResult("forward_backward", FAIL, str(exc))
 
-    sec_per_microbatch_mean = sum(timing_seconds) / len(timing_seconds)
+    sec_per_microbatch_mean = _mean(timing_seconds)
     warm_longest = longest_timings[1:] or longest_timings
-    sec_per_microbatch_longest = sum(warm_longest) / len(warm_longest)
+    sec_per_microbatch_longest = _mean(warm_longest)
     sec_per_optimizer_step = sec_per_microbatch_mean * grad_accum
 
     detail = {
@@ -398,6 +480,8 @@ def check_forward_backward(
         "timing_seed": int(seed),
         "max_timing_microbatches": int(max_timing_microbatches),
         "sec_per_microbatch_mean": sec_per_microbatch_mean,
+        "sec_prepare_mean": _mean(prepare_seconds),
+        "sec_compute_mean": _mean(compute_seconds),
         "sec_per_microbatch_longest": sec_per_microbatch_longest,
         "sec_per_optimizer_step": sec_per_optimizer_step,
         # 예전 키. sec_per_microbatch_mean의 별칭이며 optimizer step 시간이 아니다.
@@ -405,9 +489,10 @@ def check_forward_backward(
         "longest_samples": [r.id for r in longest],
         "longest_sample": longest[0].id,
         "longest_approx_length": longest[0].approx_length(),
-        "loss_mean": sum(losses) / len(losses),
+        "loss_mean": _mean(losses),
         "peak_vram_gb": runtime.peak_vram_gb(),
         "peak_vram_gb_longest": peak_after_longest,
+        "tf32": runtime.tf32_state(),
     }
     reason = (
         f"cold {detail['cold_seconds']:.2f}s/microbatch, "
@@ -416,7 +501,55 @@ def check_forward_backward(
         f"grad_accum={grad_accum} -> {sec_per_optimizer_step:.2f}s/optimizer step, "
         f"peak VRAM {detail['peak_vram_gb']} GB"
     )
+
+    if tf32_ab:
+        try:
+            detail["tf32_ab"] = _run_tf32_ab(run_one, sampled)
+        except RuntimeError as exc:
+            return CheckResult("forward_backward", FAIL, str(exc), detail)
+        finally:
+            # A/B가 어떻게 끝나든 설정값으로 되돌려 놓는다.
+            detail["tf32"] = runtime.apply_tf32(bool(tf32_enabled))
+        off = detail["tf32_ab"]["off"]["sec_per_microbatch_mean"]
+        on = detail["tf32_ab"]["on"]["sec_per_microbatch_mean"]
+        reason += f", TF32 off {off:.2f}s / on {on:.2f}s per microbatch"
+
     return CheckResult("forward_backward", PASS, reason, detail)
+
+
+def _run_tf32_ab(
+    run_one: Callable[[Any], tuple[float, float, float]],
+    sampled: Sequence[collator_mod.VQARecord],
+    *,
+    n_microbatches: int = TF32_AB_MICROBATCHES,
+    n_warmups: int = TF32_AB_WARMUPS,
+) -> dict[str, Any]:
+    """같은 표본으로 TF32를 끄고 한 번, 켜고 한 번 재서 두 평균을 돌려준다."""
+    needed = max(int(n_warmups), 0) + max(int(n_microbatches), 1)
+    if not sampled:
+        return {}
+    chosen = [sampled[i % len(sampled)] for i in range(needed)]
+
+    def one_pass(enabled: bool) -> dict[str, Any]:
+        flags = runtime.apply_tf32(enabled)
+        for record in chosen[:n_warmups]:
+            run_one(record)
+        prepare: list[float] = []
+        compute: list[float] = []
+        for record in chosen[n_warmups:]:
+            prep, comp, _ = run_one(record)
+            prepare.append(prep)
+            compute.append(comp)
+        return {
+            "tf32": flags,
+            "microbatches": len(compute),
+            "warmups": min(int(n_warmups), len(chosen)),
+            "sec_per_microbatch_mean": _mean([p + c for p, c in zip(prepare, compute)]),
+            "sec_prepare_mean": _mean(prepare),
+            "sec_compute_mean": _mean(compute),
+        }
+
+    return {"off": one_pass(False), "on": one_pass(True)}
 
 
 def check_inference(
@@ -425,17 +558,29 @@ def check_inference(
     n_infer: int,
     batch_size: int,
 ) -> CheckResult:
-    """추론 경로와 확률 형식, 항목당 시간을 본다."""
+    """추론 경로와 확률 형식, 항목당 시간을 본다.
+
+    학습 쪽과 같은 이유로 CPU 준비 구간(encode: 이미지 디코딩, processor, 템플릿)과
+    GPU 구간(scoring forward)을 따로 잰다. `seconds`와 `seconds_per_item`의 의미는
+    예전 그대로이며 두 구간의 합이다.
+    """
     import numpy as np
 
     chosen = list(records[: max(n_infer, 1)])
     started = time.time()
     correct = 0
     scored = 0
+    prepare_total = 0.0
+    compute_total = 0.0
     for start in range(0, len(chosen), batch_size):
         chunk = chosen[start : start + batch_size]
+        chunk_started = time.time()
         enc = scorer.encode(chunk, (0, 1, 2, 3))
+        prepared = time.time()
         probs, _ = scorer.score(enc)
+        runtime.cuda_sync()
+        prepare_total += prepared - chunk_started
+        compute_total += time.time() - prepared
         if not np.allclose(probs.sum(axis=1), 1.0, atol=1e-3):
             return CheckResult("inference", FAIL, "확률 합이 1이 아닙니다.", {"sums": probs.sum(axis=1).tolist()})
         for i, record in enumerate(chunk):
@@ -443,13 +588,17 @@ def check_inference(
                 scored += 1
                 correct += int(int(probs[i].argmax()) == record.answer_idx)
     elapsed = time.time() - started
+    items = max(len(chosen), 1)
     detail = {
         "items": len(chosen),
         "seconds": elapsed,
-        "seconds_per_item": elapsed / max(len(chosen), 1),
+        "seconds_per_item": elapsed / items,
+        "sec_prepare_mean": prepare_total / items,
+        "sec_compute_mean": compute_total / items,
         "accuracy_on_labeled": (correct / scored) if scored else None,
         "labeled_items": scored,
         "peak_vram_gb": runtime.peak_vram_gb(),
+        "tf32": runtime.tf32_state(),
     }
     return CheckResult(
         "inference",
@@ -457,6 +606,72 @@ def check_inference(
         f"{detail['seconds_per_item']:.2f}s/item, 라벨 있는 {scored}건 정확도={detail['accuracy_on_labeled']}",
         detail,
     )
+
+
+# --------------------------------------------------------------------------
+# 커널 fallback 경고 수집
+# --------------------------------------------------------------------------
+
+#: transformers가 최적화된 커널 대신 느린 경로를 쓸 때 남기는 문구들.
+FALLBACK_PATTERNS: tuple[str, ...] = ("falling back", "reference pytorch", "fast path")
+
+
+class KernelFallbackCollector(logging.Handler):
+    """transformers 로거에서 커널 fallback 경고만 골라 중복 없이 모은다."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.NOTSET)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            text = record.getMessage()
+        except Exception:
+            return
+        lowered = text.lower()
+        if not any(pattern in lowered for pattern in FALLBACK_PATTERNS):
+            return
+        if text not in self.messages:
+            self.messages.append(text)
+
+
+@contextlib.contextmanager
+def capture_kernel_fallbacks(collector: KernelFallbackCollector) -> Iterator[KernelFallbackCollector]:
+    """모델 로딩과 첫 forward 동안 transformers 로거에 핸들러를 붙인다.
+
+    경고를 하나도 잡지 못해도 정상이다. 어떤 이유로든 로거를 건드리지 못하면 조용히
+    아무것도 수집하지 않는다.
+    """
+    logger = None
+    previous_level = None
+    try:
+        logger = logging.getLogger("transformers")
+        previous_level = logger.level
+        if previous_level > logging.WARNING or previous_level == logging.NOTSET:
+            logger.setLevel(logging.WARNING)
+        logger.addHandler(collector)
+    except Exception:
+        logger = None
+    try:
+        yield collector
+    finally:
+        if logger is not None:
+            try:
+                logger.removeHandler(collector)
+                if previous_level is not None:
+                    logger.setLevel(previous_level)
+            except Exception:
+                pass
+
+
+def fallback_summary(messages: Sequence[str]) -> str:
+    """수집한 커널 fallback 경고를 요약 문단으로 만든다. 없으면 빈 문자열이다."""
+    if not messages:
+        return ""
+    lines = ["", "커널 fallback 경고 (느린 경로로 내려간 연산)"]
+    for message in messages:
+        lines.append(f"  - {message.strip()}")
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------
@@ -472,15 +687,38 @@ def timing_summary(results: Sequence[CheckResult]) -> str:
         if result.name == "forward_backward" and "sec_per_microbatch_mean" in detail:
             lines.append("")
             lines.append("학습 속도 (microbatch 1개 = 표본 micro_batch개의 forward+backward 1회)")
-            lines.append(f"  sec_per_microbatch_mean    : {detail['sec_per_microbatch_mean']:.3f} 초/microbatch")
+            lines.append(f"  sec_per_microbatch_mean    : {detail['sec_per_microbatch_mean']:.3f} 초/microbatch (준비+계산 합)")
+            if "sec_prepare_mean" in detail:
+                lines.append(f"  sec_prepare_mean           : {detail['sec_prepare_mean']:.3f} 초/microbatch (CPU 배치 준비)")
+            if "sec_compute_mean" in detail:
+                lines.append(f"  sec_compute_mean           : {detail['sec_compute_mean']:.3f} 초/microbatch (GPU forward+backward)")
             lines.append(f"  sec_per_microbatch_longest : {detail['sec_per_microbatch_longest']:.3f} 초/microbatch (최장 표본)")
             lines.append(f"  grad_accum                 : {detail['grad_accum']} microbatch/optimizer step")
             lines.append(f"  sec_per_optimizer_step     : {detail['sec_per_optimizer_step']:.3f} 초/optimizer step  <- 예산은 이 값을 씁니다")
             lines.append(f"  peak_vram_gb               : {detail['peak_vram_gb']} GB")
+            ab = detail.get("tf32_ab") or {}
+            if ab.get("off") and ab.get("on"):
+                lines.append("")
+                lines.append(f"TF32 A/B (한쪽마다 warm-up {ab['on'].get('warmups')}회 뒤 {ab['on'].get('microbatches')} microbatch)")
+                for label, key in (("off", "off"), ("on", "on")):
+                    side = ab[key]
+                    lines.append(
+                        f"  TF32 {label:3s}                   : "
+                        f"{side['sec_per_microbatch_mean']:.3f} 초/microbatch "
+                        f"(준비 {side['sec_prepare_mean']:.3f} 초, 계산 {side['sec_compute_mean']:.3f} 초)"
+                    )
+                off_mean = ab["off"]["sec_per_microbatch_mean"]
+                on_mean = ab["on"]["sec_per_microbatch_mean"]
+                if on_mean > 0:
+                    lines.append(f"  TF32 속도 배수             : {off_mean / on_mean:.2f}배 (off 기준 on이 몇 배 빠른지)")
         if result.name == "inference" and "seconds_per_item" in detail:
             lines.append("")
             lines.append("추론 속도")
-            lines.append(f"  seconds_per_item           : {detail['seconds_per_item']:.3f} 초/문항")
+            lines.append(f"  seconds_per_item           : {detail['seconds_per_item']:.3f} 초/문항 (준비+계산 합)")
+            if "sec_prepare_mean" in detail:
+                lines.append(f"  sec_prepare_mean           : {detail['sec_prepare_mean']:.3f} 초/문항 (CPU 배치 준비)")
+            if "sec_compute_mean" in detail:
+                lines.append(f"  sec_compute_mean           : {detail['sec_compute_mean']:.3f} 초/문항 (GPU scoring forward)")
     return "\n".join(lines)
 
 
@@ -497,12 +735,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--csv", default=None, help="점검에 쓸 CSV. 기본값 DATA_ROOT/train.csv")
     parser.add_argument("--skip-model", action="store_true", help="모델 로딩 없이 토큰/템플릿만 점검")
+    parser.add_argument(
+        "--tf32-ab",
+        action="store_true",
+        help=(
+            f"무작위 표본 일부로 TF32를 끄고 한 번, 켜고 한 번 속도를 잰다 "
+            f"(한쪽마다 warm-up {TF32_AB_WARMUPS}회 뒤 {TF32_AB_MICROBATCHES} microbatch)"
+        ),
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = config_mod.config_from_args(args)
+
+    tf32_enabled = bool(config_mod.get_path(cfg, "runtime.tf32", True))
+    tf32_info = runtime.apply_tf32(tf32_enabled)
+    print(runtime.tf32_line(tf32_info))
 
     data_root = runtime.data_root(args.data_root)
     root = runtime.run_root(args.run_root)
@@ -573,6 +823,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             lambda: check_prefix_match(processor, spec, records, data_root, tokens),
         )
 
+    fallback_collector = KernelFallbackCollector()
+
     if not args.skip_model and records:
         backend = None
         scorer = None
@@ -604,19 +856,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 detail,
             )
 
-        if flight.run("model_load", build_model).status == PASS:
-            flight.run("lora_targets", lambda: check_lora_targets(backend.model, cfg)[0])
-            flight.run(
-                "forward_backward",
-                lambda: check_forward_backward(
-                    backend,
-                    records,
-                    args.n_train_steps,
-                    grad_accum=int(config_mod.get_path(cfg, "train.grad_accum", 1) or 1),
-                    max_timing_microbatches=args.max_timing_microbatches,
-                    seed=int(config_mod.get_path(cfg, "train.seed", 42) or 0),
-                ),
-            )
+        # 모델 로딩과 첫 forward 동안 transformers의 커널 fallback 경고를 모은다.
+        with capture_kernel_fallbacks(fallback_collector):
+            model_loaded = flight.run("model_load", build_model).status == PASS
+            if model_loaded:
+                # target 목록은 backend가 감싸기 전에 탐지해 둔 값을 그대로 쓴다.
+                flight.run(
+                    "lora_targets",
+                    lambda: check_lora_targets(backend.model, cfg, getattr(backend, "targets", None))[0],
+                )
+                flight.run(
+                    "forward_backward",
+                    lambda: check_forward_backward(
+                        backend,
+                        records,
+                        args.n_train_steps,
+                        grad_accum=int(config_mod.get_path(cfg, "train.grad_accum", 1) or 1),
+                        max_timing_microbatches=args.max_timing_microbatches,
+                        seed=int(config_mod.get_path(cfg, "train.seed", 42) or 0),
+                        tf32_ab=bool(args.tf32_ab),
+                        tf32_enabled=tf32_enabled,
+                    ),
+                )
+
+        if model_loaded:
 
             def inference_check() -> CheckResult:
                 nonlocal scorer
@@ -646,12 +909,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         "args": vars(args),
         "overall": FAIL if flight.failed else PASS,
         "results": [r.as_dict() for r in flight.results],
+        "tf32": tf32_info,
+        "kernel_fallback_warnings": list(fallback_collector.messages),
     }
     out_path = out_dir / f"{runtime.timestamp_tag()}.json"
     runtime.atomic_write_json(out_path, payload)
 
     print(flight.summary())
     print(timing_summary(flight.results))
+    fallbacks = fallback_summary(fallback_collector.messages)
+    if fallbacks:
+        print(fallbacks)
     print(f"\n기록: {out_path}")
     return 1 if flight.failed else 0
 

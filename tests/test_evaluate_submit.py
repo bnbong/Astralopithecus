@@ -1055,3 +1055,122 @@ def test_read_id_list_from_csv_and_txt(tmp_path: Path, sample_submission: Path, 
     txt = tmp_path / "ids.txt"
     txt.write_text("\n".join(ids) + "\n", encoding="utf-8")
     assert read_id_list(txt) == ids
+
+
+# --------------------------------------------------------------------------
+# 팀원 형식(prob_a~prob_d)과의 상호 변환
+# --------------------------------------------------------------------------
+
+
+def write_teammate_csv(path: Path, ids: list[str], *, with_run_id: bool = False) -> pd.DataFrame:
+    """infer_val.py가 남기는 형식(id, pred, prob_a~prob_d)으로 파일을 쓴다."""
+    frame = make_frame(ids, run_id="teamrun", seed=3)
+    probs = frame[list(PROB_COLUMNS)].to_numpy(dtype=float)
+    out = pd.DataFrame({"id": ids})
+    out["pred"] = [LETTERS[i] for i in probs.argmax(axis=1)]
+    for index, letter in enumerate(LETTERS):
+        out[f"prob_{letter}"] = probs[:, index].round(6)
+    if with_run_id:
+        out["run_id"] = "teamrun"
+    out.to_csv(path, index=False, encoding="utf-8-sig", lineterminator="\n")
+    return out
+
+
+def test_load_predictions_reads_a_teammate_file(tmp_path: Path, ids: list[str]) -> None:
+    path = tmp_path / "preds_teammate.csv"
+    written = write_teammate_csv(path, ids)
+
+    loaded = load_predictions(path)
+    assert list(loaded.columns) == list(PRED_COLUMNS)
+    assert loaded["id"].tolist() == ids
+    # run_id가 없는 파일이므로 기본값으로 채워진다.
+    assert loaded["run_id"].unique().tolist() == ["unknown"]
+    np.testing.assert_allclose(
+        loaded[list(PROB_COLUMNS)].to_numpy(dtype=float),
+        written[[f"prob_{c}" for c in LETTERS]].to_numpy(dtype=float),
+        atol=1e-9,
+    )
+
+
+def test_load_predictions_keeps_the_run_id_a_teammate_file_already_has(
+    tmp_path: Path, ids: list[str]
+) -> None:
+    path = tmp_path / "preds_teammate_runid.csv"
+    write_teammate_csv(path, ids, with_run_id=True)
+    loaded = load_predictions(path, default_run_id="ignored")
+    assert loaded["run_id"].unique().tolist() == ["teamrun"]
+
+
+def test_load_predictions_default_run_id_is_configurable(tmp_path: Path, ids: list[str]) -> None:
+    path = tmp_path / "preds_teammate2.csv"
+    write_teammate_csv(path, ids)
+    assert load_predictions(path, default_run_id="qwen3b_p2")["run_id"].unique().tolist() == [
+        "qwen3b_p2"
+    ]
+
+
+def test_evaluate_run_reads_a_teammate_file(tmp_path: Path, gold_csv: Path, ids: list[str]) -> None:
+    """scripts/evaluate_run.py가 팀원 파일을 그대로 읽을 수 있어야 한다."""
+    path = tmp_path / "preds_teammate_eval.csv"
+    write_teammate_csv(path, ids)
+    result = evaluate_predictions(load_predictions(path), load_gold(gold_csv))
+    assert result.n == len(ids)
+    assert result.run_id == "unknown"
+
+
+def test_convert_preds_round_trip(tmp_path: Path, ids: list[str]) -> None:
+    from scripts import convert_preds as convert_cli
+
+    original = tmp_path / "vqa.csv"
+    frame = make_frame(ids, run_id="run1", seed=11)
+    write_predictions(frame, original)
+
+    teammate = tmp_path / "teammate.csv"
+    assert convert_cli.main(["--to", "teammate", "--in", str(original), "--out", str(teammate)]) == 0
+    team_frame = pd.read_csv(teammate, encoding="utf-8-sig")
+    assert list(team_frame.columns) == ["id", "pred", "prob_a", "prob_b", "prob_c", "prob_d"]
+    probs = frame[list(PROB_COLUMNS)].to_numpy(dtype=float)
+    assert team_frame["pred"].tolist() == [LETTERS[i] for i in probs.argmax(axis=1)]
+
+    back = tmp_path / "back.csv"
+    assert (
+        convert_cli.main(
+            ["--to", "vqa", "--in", str(teammate), "--out", str(back), "--run-id", "run1"]
+        )
+        == 0
+    )
+    restored = load_predictions(back)
+    assert restored["id"].tolist() == ids
+    assert restored["run_id"].unique().tolist() == ["run1"]
+    np.testing.assert_allclose(
+        restored[list(PROB_COLUMNS)].to_numpy(dtype=float), probs, atol=1e-5
+    )
+
+
+def test_convert_preds_to_vqa_renormalises_within_tolerance(tmp_path: Path) -> None:
+    from scripts import convert_preds as convert_cli
+
+    source = tmp_path / "rounded.csv"
+    source.write_text(
+        "id,pred,prob_a,prob_b,prob_c,prob_d\n"
+        "test_0001.jpg,a,0.5001,0.2,0.2,0.1\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out.csv"
+    assert convert_cli.main(["--to", "vqa", "--in", str(source), "--out", str(out), "--run-id", "r"]) == 0
+    loaded = load_predictions(out)
+    assert float(loaded[list(PROB_COLUMNS)].to_numpy(dtype=float).sum()) == pytest.approx(1.0)
+
+
+def test_convert_preds_to_vqa_refuses_rows_that_do_not_sum_to_one(tmp_path: Path) -> None:
+    from scripts import convert_preds as convert_cli
+
+    source = tmp_path / "broken.csv"
+    source.write_text(
+        "id,pred,prob_a,prob_b,prob_c,prob_d\n"
+        "test_0001.jpg,a,0.9,0.9,0.9,0.9\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out.csv"
+    assert convert_cli.main(["--to", "vqa", "--in", str(source), "--out", str(out), "--run-id", "r"]) == 2
+    assert not out.exists()

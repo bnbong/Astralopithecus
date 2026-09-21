@@ -47,6 +47,9 @@ wrong_*.csv
 
 # 다만 split 정보는 팀 전원이 동일한 값을 써야 하므로 추적한다.
 # (ID 목록과 설정만 들어 있고 질문이나 이미지는 들어 있지 않다.)
+!artifacts/data/split_fold0.json
+!artifacts/data/val_fold0_ids.txt
+!artifacts/data/README.md
 !artifacts/data/split_v1.json
 !artifacts/data/train_ids.txt
 !artifacts/data/val_ids.txt

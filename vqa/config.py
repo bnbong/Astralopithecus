@@ -55,6 +55,11 @@ DEFAULTS: dict[str, Any] = {
         "save_every_items": 50,
         "num_workers": 0,
     },
+    "runtime": {
+        # Ampere 이상에서 fp32 matmul을 TF32로 돌린다. 수치가 조금 달라지지만 학습
+        # 의미를 바꾸는 설정이 아니므로 config_hash에서는 제외한다.
+        "tf32": True,
+    },
 }
 
 #: config_hash 계산에서 제외하는 점 표기 키. 학습 결과를 바꾸지 않는 운영 설정이다.
@@ -68,6 +73,8 @@ HASH_EXCLUDED_KEYS: tuple[str, ...] = (
     "train.num_workers",
     "model_path",
     "attn_implementation",
+    # TF32는 속도 설정이다. 이 값 때문에 checkpoint 재개가 거부되면 안 된다.
+    "runtime.tf32",
 )
 
 

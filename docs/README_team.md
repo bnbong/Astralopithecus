@@ -12,7 +12,7 @@
 | 담당 | 역할 | 오늘 여는 노트북 |
 |---|---|---|
 | 준혁 | 전체 통합과 Colab 27B 실행 | `20_colab_27b_setup_preflight.ipynb`, 이어서 `21_colab_27b_run.ipynb` |
-| 수빈 | 데이터 검사와 분할 | `01_data_audit_split.ipynb` |
+| 수빈 | 데이터 검사와 공식 분할 확정 | `01_data_audit_split.ipynb` |
 | 유림 | 공통 학습 코드와 실습실 9B 학습 | `12_lab_train_9b_qlora.ipynb` |
 | 창혁 | 프롬프트와 OCR, 해상도 결정 | `11_lab_prompt_ocr_compare.ipynb` |
 | 수정 | 평가와 결합, 제출 검사 | `30_eval_submit.ipynb` |
@@ -51,9 +51,10 @@ requirements를 통째로 설치하십시오. 파이썬 버전은 우리가 아�
   파일은 `id,p_a,p_b,p_c,p_d,run_id` 컬럼을 이 순서로 가져야 하며, `vqa/predict.py` 와
   `vqa/submit.py`, `scripts/evaluate_run.py` 가 모두 이 형식을 전제합니다. 저장소에는 별도의
   계약 문서를 두지 않고 `README.md` 의 팀 규칙 절을 기준으로 삼습니다.
-- **G1 데이터 확정**: 수빈의 `artifacts/data/split_v1.json` 이 있어야 창혁과 유림이 시작할 수
-  있습니다. 창혁의 개발 표본은 반드시 train ID에서만 뽑으며, validation에서 뽑으면 이후의 모든
-  정확도 비교가 오염됩니다.
+- **G1 데이터 확정**: 수빈의 `artifacts/data/split_fold0.json` 이 있어야 창혁과 유림이 시작할 수
+  있습니다. 이 파일은 `scripts/folds_to_split.py` 가 팀 공식 fold CSV 두 개를 합쳐서 만듭니다.
+  창혁의 개발 표본은 반드시 `train_fold1234` 의 학습 ID에서만 뽑으며, fold 0에서 뽑으면 이후의
+  모든 정확도 비교가 오염됩니다.
 - **G2 입력과 환경 확정**: 창혁의 `artifacts/input_config_frozen.json` 이 나와야 27B base 캐시를
   만들 수 있습니다. 이 게이트는 모델별로 따로 통과하므로, 9B는 27B 점검이 끝나기를 기다리지
   않습니다.
@@ -107,8 +108,10 @@ D1 오전에 수정이 대표로 질문하고, 받은 답을 팀 채널에 그�
 ├─ docs/                                이 문서와 환경별 안내
 └─ artifacts/
    ├─ data/                             split과 검사 결과
-   │  ├─ split_v1.json                  유일하게 git으로 추적하는 산출물입니다.
-   │  ├─ train_ids.txt, val_ids.txt     `--val-ids` 와 `--ids-file` 에 넘기는 목록입니다.
+   │  ├─ split_fold0.json               공식 분할입니다. git으로 추적합니다.
+   │  ├─ val_fold0_ids.txt              `--val-ids` 와 `--ids-file` 에 넘기는 목록입니다.
+   │  ├─ README.md                      split_v1 폐기 안내
+   │  ├─ split_v1.json, train_ids.txt, val_ids.txt   폐기한 옛 분할입니다.
    │  ├─ split_leakage.csv
    │  ├─ audit_report.json, audit_report.md
    │  └─ near_duplicate_pairs.csv, image_hashes.csv
@@ -196,3 +199,71 @@ zip으로 묶고 파일 이름에 날짜와 시각을 넣어서 어느 버전인
 - **Colab 세션이 끊긴 경우**의 대응은 `docs/colab_survival.md` 에 따로 정리했습니다.
 - **GPU가 모자란 경우**에는 한 PC에서 큰 작업을 두 개 동시에 돌리지 않습니다. PC 다섯 대의 VRAM은
   하나로 합쳐지지 않으므로, 같은 학습을 여러 대에서 반복하는 대신 추론 대상 ID를 나눠야 합니다.
+
+## 8. 공식 분할과 기준선 (2026-09-21 확정)
+
+공식 검증셋은 train의 fold 0이며 1,344문항입니다. 파일은 `fold_csv_files/val_fold0.csv` 이고,
+`id` 컬럼 하나만 들어 있습니다. 학습에는 `fold_csv_files/train_fold1234.csv` 의 5,358문항을
+씁니다. 이 파일에서는 test와 이미지가 완전히 같은 train 24문항을 이미 빼 두었습니다. 분할은
+이미지 MD5를 그룹 키로 쓰는 StratifiedGroupKFold 5-fold 결과이며, 근거는
+`fold_csv_files/데이터처리_검증분할.md` 에 정리되어 있습니다.
+
+두 CSV를 합쳐서 `vqa.train --split` 에 넘길 JSON을 만드는 명령은 다음과 같습니다.
+
+```
+python scripts/folds_to_split.py
+```
+
+결과 파일은 `artifacts/data/split_fold0.json` 이고 내용 해시는
+`ea2c8572129342f138c551e6e32a3427902c730db349c45d0e5342f03dfccae0` 입니다. 검증 500문항을 쓰던
+`artifacts/data/split_v1.json` 은 폐기했습니다.
+
+MD5 그룹만으로 묶었기 때문에 픽셀이 조금 다른 근접 중복은 잡히지 않았습니다. fold 0과 학습
+분할에 걸쳐 있는 쌍이 하나 남아 있으며 `train_0395.jpg` 와 `train_4458.jpg` 입니다. perceptual
+hash로만 일치하고 문항 수로 보면 무시할 만한 수준이라서 그대로 둡니다.
+
+넘어야 할 기준선은 Qwen2.5-VL-3B를 zero-shot으로 돌리고 프롬프트 p2를 쓴 fold 0 정확도
+0.9159입니다. 같은 모델의 p1 정확도는 0.8862였고, Kaggle public 점수는 0.89871이었습니다.
+
+## 9. 27B에서 프롬프트를 비교하는 방법
+
+팀원이 측정한 p2는 `vqa/prompt.py` 에 `v2_read_text` 라는 prompt_id로 들어가 있습니다. 문구와
+선택지 표기, 그리고 system turn을 쓰지 않는다는 점까지 `infer_val.py` 의 원본과 같습니다.
+기본 prompt_id는 바꾸지 않았으므로, 비교할 때에만 `--set prompt_id=...` 로 지정하십시오.
+
+fold 0에서 두 번 추론한 다음 각각 평가하면 됩니다.
+
+```
+python -m vqa.predict --config configs/colab_qwen35_27b_bf16.yaml \
+    --run-id colab27b_base_bf16 --csv train.csv \
+    --ids-file fold_csv_files/val_fold0.csv --adapter none \
+    --set prompt_id=v1_image_only --out-name fold0_base_v1
+
+python -m vqa.predict --config configs/colab_qwen35_27b_bf16.yaml \
+    --run-id colab27b_base_bf16 --csv train.csv \
+    --ids-file fold_csv_files/val_fold0.csv --adapter none \
+    --set prompt_id=v2_read_text --out-name fold0_base_v2
+
+python scripts/evaluate_run.py --pred <RUN_ROOT>/colab27b_base_bf16/preds/fold0_base_v1.csv \
+    --gold train.csv --val-ids fold_csv_files/val_fold0.csv --note "27B zero-shot v1"
+
+python scripts/evaluate_run.py --pred <RUN_ROOT>/colab27b_base_bf16/preds/fold0_base_v2.csv \
+    --gold train.csv --val-ids fold_csv_files/val_fold0.csv --note "27B zero-shot v2_read_text"
+```
+
+`--out-name` 을 서로 다르게 지정해야 두 결과가 덮어써지지 않습니다. 두 평가 결과는
+`artifacts/experiments.jsonl` 에 한 줄씩 쌓이므로 나중에 비교할 수 있습니다.
+
+## 10. 예측 파일의 컬럼 이름이 다를 때
+
+팀원 도구인 `infer_val.py` 와 `eval_val.py` 는 `id, pred, prob_a~prob_d` 를 쓰고, `vqa` 패키지는
+`id, p_a~p_d, run_id` 를 씁니다. `vqa.predictions.load_predictions` 가 두 이름을 모두 읽으므로,
+`scripts/combine.py` 와 `scripts/evaluate_run.py` 에는 팀원 파일을 그대로 넘겨도 됩니다.
+`run_id` 가 없는 파일은 `unknown` 으로 채워집니다.
+
+파일 자체를 바꿔야 한다면 다음 명령을 쓰십시오.
+
+```
+python scripts/convert_preds.py --to teammate --in <vqa 형식 CSV> --out <팀원 형식 CSV>
+python scripts/convert_preds.py --to vqa --in <팀원 형식 CSV> --out <vqa 형식 CSV> --run-id <run_id>
+```

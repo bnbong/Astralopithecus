@@ -342,6 +342,84 @@ def pick_device() -> str:
     return "cpu"
 
 
+def cuda_sync() -> None:
+    """CUDA 커널이 끝날 때까지 기다린다. CUDA가 없으면 아무 일도 하지 않는다."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    except Exception:
+        pass
+
+
+# --------------------------------------------------------------------------
+# TF32
+# --------------------------------------------------------------------------
+
+
+def _set_quietly(fn: Any) -> None:
+    """torch 버전에 따라 없을 수 있는 속성을 조용히 건드린다."""
+    try:
+        fn()
+    except Exception:
+        pass
+
+
+def _get_quietly(fn: Any) -> Any:
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
+def tf32_state() -> dict[str, Any]:
+    """현재 TF32 관련 torch 플래그 값을 읽는다. torch가 없으면 None만 담긴다."""
+    state: dict[str, Any] = {"matmul": None, "cudnn": None, "float32_matmul_precision": None}
+    try:
+        import torch
+    except Exception:
+        return state
+    state["matmul"] = _get_quietly(lambda: bool(torch.backends.cuda.matmul.allow_tf32))
+    state["cudnn"] = _get_quietly(lambda: bool(torch.backends.cudnn.allow_tf32))
+    state["float32_matmul_precision"] = _get_quietly(torch.get_float32_matmul_precision)
+    return state
+
+
+def apply_tf32(enabled: bool) -> dict[str, Any]:
+    """TF32 matmul 경로를 켜거나 끄고, 실제로 반영된 값을 돌려준다.
+
+    Ampere 이상에서 fp32 matmul을 TF32로 돌리면 같은 코드가 크게 빨라진다. 특히
+    Gated DeltaNet의 torch fallback처럼 float32로 캐스팅하는 경로가 섞인 모델에서는
+    전체 레이어의 상당수가 fp32 matmul이라 차이가 더 벌어진다.
+
+    CPU 전용 torch에서 플래그를 세팅하는 것 자체는 무해하지만, 버전에 따라 속성이
+    없을 수 있으므로 어떤 경우에도 예외를 올리지 않는다.
+    """
+    enabled = bool(enabled)
+    try:
+        import torch
+    except Exception as exc:
+        return {"requested": enabled, "matmul": None, "cudnn": None, "float32_matmul_precision": None, "error": repr(exc)}
+
+    _set_quietly(lambda: setattr(torch.backends.cuda.matmul, "allow_tf32", enabled))
+    _set_quietly(lambda: setattr(torch.backends.cudnn, "allow_tf32", enabled))
+    _set_quietly(lambda: torch.set_float32_matmul_precision("high" if enabled else "highest"))
+
+    state = tf32_state()
+    state["requested"] = enabled
+    return state
+
+
+def tf32_line(state: dict[str, Any] | None) -> str:
+    """프로세스 시작 로그에 한 줄로 찍는 TF32 상태."""
+    state = state or {}
+    return (
+        f"[runtime] TF32 matmul={state.get('matmul')} cudnn={state.get('cudnn')} "
+        f"float32_matmul_precision={state.get('float32_matmul_precision')}"
+    )
+
+
 def peak_vram_gb() -> float | None:
     try:
         import torch
@@ -397,6 +475,7 @@ def environment_report(paths: dict[str, Any] | None = None) -> dict[str, Any]:
             )
         },
     }
+    report["tf32"] = tf32_state()
     try:
         import torch
 

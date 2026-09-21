@@ -595,6 +595,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = config_mod.config_from_args(args)
 
+    # 모델을 올리기 전에 한 번만 적용한다. TF32는 fp32 matmul 경로의 속도를 좌우한다.
+    tf32_info = runtime.apply_tf32(bool(config_mod.get_path(cfg, "runtime.tf32", True)))
+    print(runtime.tf32_line(tf32_info))
+
     data_root = runtime.data_root(args.data_root)
     run_dir = runtime.run_dir(args.run_id, args.run_root)
     scratch = runtime.ensure_dir(runtime.local_scratch(args.local_scratch) / args.run_id)
@@ -640,6 +644,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "environment": runtime.environment_report(
             {"data_root": data_root, "run_root": run_dir, "scratch": scratch}
         ),
+        "tf32": tf32_info,
     }
     runtime.atomic_write_json(run_dir / "run_manifest.json", manifest)
     print(
