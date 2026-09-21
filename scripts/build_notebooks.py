@@ -215,6 +215,179 @@ CLI_ASSUMPTIONS_MD = """
 곳에서 막히지 않게 하십시오.
 """
 
+# Colab 전용. 부트스트랩보다 먼저 실행되므로 BOOT의 헬퍼를 하나도 쓰지 않는다.
+CODE_FETCH = r'''
+# --- 코드 가져오기 (부트스트랩보다 먼저 실행합니다. BOOT의 헬퍼를 쓰지 않습니다.) ---
+import os, re, shutil, subprocess, zipfile
+from pathlib import Path
+
+_code_root = Path(PROJECT_ROOT).expanduser()
+
+
+def scrub_secret(text, secret=None):
+    """출력에 토큰이 섞여 나가지 않도록 가립니다."""
+    if not text:
+        return ""
+    if secret:
+        text = text.replace(secret, "***")
+    return re.sub(r"(https://)[^/@\s]*@", r"\1***@", text)
+
+
+def _git(args, secret=None, check=True):
+    """git 명령을 조용히 실행하고, 출력에서 토큰을 지운 뒤 돌려줍니다."""
+    proc = subprocess.run(
+        ["git"] + [str(a) for a in args],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    out = scrub_secret(proc.stdout, secret)
+    if check and proc.returncode != 0:
+        raise RuntimeError("git 명령이 실패했습니다 (rc=%d).\n%s" % (proc.returncode, out.strip()))
+    return proc.returncode, out
+
+
+def _read_github_token():
+    """Colab 비밀 저장소에서 토큰을 읽습니다. 없으면 None을 돌려줍니다."""
+    try:
+        from google.colab import userdata
+        return userdata.get("GITHUB_TOKEN") or None
+    except Exception:
+        # SecretNotFoundError, NotebookAccessError, ImportError를 모두 여기에서 받습니다.
+        return None
+
+
+def _flatten_single_top_dir(target):
+    """압축 안에 최상위 폴더가 하나뿐이면 그 안의 내용을 target 바로 아래로 올립니다."""
+    entries = [p for p in target.iterdir() if p.name != "__MACOSX"]
+    if len(entries) == 1 and entries[0].is_dir():
+        inner = entries[0]
+        for item in list(inner.iterdir()):
+            shutil.move(str(item), str(target / item.name))
+        inner.rmdir()
+        return True
+    return False
+
+
+CODE_VERSION = None
+
+if (_code_root / ".git").exists():
+    rc, out = _git(["-C", str(_code_root), "pull", "--ff-only"], check=False)
+    if rc == 0:
+        print("코드를 최신 상태로 갱신했습니다.")
+    else:
+        print("git pull이 실패했습니다. 이미 받아 둔 코드를 그대로 사용하고 계속 진행합니다.")
+        print(out.strip()[:600])
+    _, _head = _git(["-C", str(_code_root), "rev-parse", "HEAD"], check=False)
+    CODE_VERSION = _head.strip()
+else:
+    _token = _read_github_token()
+    if _token:
+        print("Colab 비밀 GITHUB_TOKEN을 찾았습니다. 저장소를 복제합니다.")
+        _code_root.parent.mkdir(parents=True, exist_ok=True)
+        _auth_url = REPO_URL.replace("https://", "https://x-access-token:%s@" % _token, 1)
+        _rc, _out = _git(["clone", "--depth", "1", "--branch", REPO_BRANCH,
+                          _auth_url, str(_code_root)], secret=_token, check=False)
+        if _rc != 0:
+            raise RuntimeError("저장소 복제에 실패했습니다. 토큰 권한과 저장소 주소를 확인하십시오.\n"
+                               + _out.strip()[:600])
+        # 토큰이 .git/config에 남지 않도록 곧바로 원래 주소로 되돌립니다.
+        _git(["-C", str(_code_root), "remote", "set-url", "origin", REPO_URL], secret=_token)
+        _, _head = _git(["-C", str(_code_root), "rev-parse", "HEAD"], check=False)
+        CODE_VERSION = _head.strip()
+        del _auth_url, _token
+    elif CODE_ZIP and Path(CODE_ZIP).expanduser().exists():
+        _zip_path = Path(CODE_ZIP).expanduser()
+        print("토큰이 없어 Drive의 코드 압축 파일을 사용합니다:", _zip_path)
+        _code_root.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(_zip_path) as _zf:
+            _zf.extractall(_code_root)
+        if _flatten_single_top_dir(_code_root):
+            print("압축 안의 최상위 폴더 하나를 펼쳐서 %s 바로 아래로 옮겼습니다." % _code_root)
+        CODE_VERSION = "zip:" + _zip_path.name
+    else:
+        raise RuntimeError(
+            "코드를 가져올 방법이 없습니다. 이 저장소는 비공개이므로 다음 두 가지 중 하나를 준비해야 합니다.\n"
+            "1) GitHub에서 이 저장소에만 Contents 읽기 권한을 준 fine-grained personal access token을 만든 다음, "
+            "Colab 왼쪽의 열쇠 아이콘 패널에서 이름을 GITHUB_TOKEN으로 등록하고 현재 노트북의 접근을 허용하십시오.\n"
+            "2) 코드 전체를 zip으로 묶어 Drive에 올린 다음, 파라미터 셀의 CODE_ZIP에 그 경로를 적으십시오."
+        )
+
+if not (_code_root / "vqa").is_dir():
+    print("주의: %s 아래에 vqa 패키지가 보이지 않습니다. 압축 파일의 구조를 확인하십시오." % _code_root)
+
+print("코드 위치 :", _code_root)
+print("코드 버전 :", CODE_VERSION)
+'''
+
+# 부트스트랩 직후에 실행합니다. CODE_VERSION과 RUN_ROOT_P가 모두 준비된 뒤여야 합니다.
+CODE_VERSION_LOG = r'''
+# --- 어떤 코드로 실행했는지 남깁니다 ---
+_code_version_path = RUN_ROOT_P / "code_version.txt"
+with _code_version_path.open("a", encoding="utf-8") as _fh:
+    _fh.write("%s\t%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"),
+                            CODE_VERSION or "(알 수 없음)"))
+print("코드 버전을 기록했습니다: %s -> %s" % (_code_version_path, CODE_VERSION))
+'''
+
+# 압축 해제 부분만 공유합니다. 확인 출력은 노트북마다 따로 붙입니다.
+DATA_STAGE = r'''
+# --- 데이터를 로컬 디스크에 준비합니다 ---
+import getpass, shutil
+
+data_root = Path(DATA_ROOT)
+
+
+def locate_data_root(base):
+    """압축 안에 최상위 폴더가 하나 있었다면 그 하위 폴더를 데이터 위치로 삼습니다."""
+    if (base / "train.csv").exists():
+        return base
+    if base.is_dir():
+        subs = [p for p in sorted(base.iterdir())
+                if p.is_dir() and p.name != "__MACOSX" and (p / "train.csv").exists()]
+        if len(subs) == 1:
+            return subs[0]
+    return base
+
+
+def ensure_7z():
+    """7z 명령이 없으면 조용히 설치합니다."""
+    if shutil.which("7z"):
+        return
+    print("7z 명령이 없어 p7zip-full을 설치합니다. 30초 정도 걸립니다.")
+    run(["apt-get", "-qq", "install", "-y", "p7zip-full"], check=False, quiet=True)
+    if not shutil.which("7z"):
+        raise RuntimeError("p7zip-full 설치에 실패했습니다. 런타임의 네트워크 상태를 확인하십시오.")
+
+
+data_root.mkdir(parents=True, exist_ok=True)
+found_root = locate_data_root(data_root)
+
+if (found_root / "train.csv").exists() and (found_root / "train").is_dir():
+    print("이미 데이터가 준비되어 있습니다:", found_root)
+else:
+    ensure_7z()
+    if str(ARCHIVE_PASSWORD).strip().lower() == "none":
+        pwd = None
+        print("ARCHIVE_PASSWORD가 none이므로 암호가 없는 압축 파일로 처리합니다.")
+    else:
+        pwd = ARCHIVE_PASSWORD or getpass.getpass("압축 파일 비밀번호를 입력하십시오: ")
+    cmd = ["7z", "x", "-y"]
+    if pwd:
+        cmd.append("-p" + pwd)
+    cmd += ["-o" + str(data_root), ARCHIVE_PATH]
+    print("$ 7z x -y %s -o%s %s" % ("-p***" if pwd else "", data_root, ARCHIVE_PATH))
+    run(cmd, echo=False)
+    found_root = locate_data_root(data_root)
+
+if found_root != data_root:
+    print("압축 안의 하위 폴더를 데이터 위치로 사용합니다:", found_root)
+
+data_root = found_root
+DATA_ROOT = str(data_root)
+DATA_ROOT_P = data_root
+os.environ["VQA_DATA_ROOT"] = str(data_root)
+'''
+
 
 # --------------------------------------------------------------------------
 # 00_lab_env_check
@@ -472,7 +645,7 @@ OUT_DIR = "artifacts/data"
 AUDIT_REPORT = "artifacts/data/audit_report.json"
 PAIRS_CSV = "artifacts/data/near_duplicate_pairs.csv"
 SPLIT_OUT = "artifacts/data/split_v1.json"
-VAL_SIZE = 400          # 계획서의 300~500 목표 범위 안에서 정합니다.
+VAL_SIZE = 500          # 계획서의 300~500 목표 범위 안에서 정한 값이며, 고정 split과 같습니다.
 SEED = 20250921
 PHASH_THRESHOLD = 8     # 근접 중복 판정에 쓸 perceptual hash 거리 상한
 DUP_PAIRS_TO_SHOW = 24  # 한 번에 눈으로 확인할 근접 중복 후보 쌍의 개수
@@ -1522,6 +1695,9 @@ compute unit 예산을 계산하는 것입니다.
     cells.append(code(r'''
 # ===== 파라미터 =====
 PROJECT_ROOT = "/content/ssafy-16-2-ai"          # 코드 저장소를 풀어 둘 위치
+REPO_URL = "https://github.com/bnbong/Astralopithecus.git"   # 비공개 저장소입니다.
+REPO_BRANCH = "main"
+CODE_ZIP = ""                                     # 토큰을 쓸 수 없을 때 사용할 Drive의 코드 zip 경로
 DRIVE_MOUNT = "/content/drive"
 DRIVE_DIR = "/content/drive/MyDrive/vqa"          # 영속 산출물을 둘 Drive 폴더
 ARCHIVE_PATH = "/content/drive/MyDrive/ssafy-16-2-ai.zip"   # 암호가 걸린 데이터 압축 파일
@@ -1541,8 +1717,8 @@ CU_PER_HOUR = 0.0           # 계정 화면에서 본 현재 GPU의 시간당 �
 CU_EXPIRY = "미확인"         # 만료일
 
 N_TEST_ITEMS = 6714
-N_VAL_ITEMS = 400
-N_TRAIN_SAMPLES = 6314      # 학습에 쓸 표본 수. split 확정 뒤에 실제 값으로 고칩니다.
+N_VAL_ITEMS = 500           # 고정 split의 val 문항 수. split 파일이 있으면 아래에서 덮어씁니다.
+N_TRAIN_SAMPLES = 6214      # 고정 split의 train 표본 수. split 파일이 있으면 아래에서 덮어씁니다.
 MICRO_BATCH = 1
 GRAD_ACCUM = 8
 ''', parameters=True))
@@ -1560,7 +1736,43 @@ drive.mount(DRIVE_MOUNT)
 print("Drive를 연결했습니다.")
 '''))
 
+    cells.append(md("""
+## 1-1. 코드 가져오기
+
+새로 만들어진 Colab 가상 머신에는 저장소가 들어 있지 않습니다. 부트스트랩 셀이 `PROJECT_ROOT` 로
+작업 디렉터리를 옮기기 때문에, 그보다 먼저 이 셀로 코드를 내려받아야 합니다.
+
+저장소가 비공개이므로 인증 수단이 필요하며, 다음 두 가지 중 하나를 준비하면 됩니다.
+
+1. GitHub의 Settings에서 이 저장소에만 Contents 읽기 권한을 준 fine-grained personal access
+   token을 만듭니다. 그다음 Colab 화면 왼쪽의 열쇠 아이콘 패널을 열고, 이름을 `GITHUB_TOKEN` 으로
+   해서 토큰 값을 등록하고 현재 노트북의 접근을 허용합니다. 토큰 값은 화면과 로그에 출력되지
+   않으며, 복제가 끝나는 즉시 remote 주소에서 제거하므로 `.git/config` 에도 남지 않습니다.
+2. 토큰을 쓰기 어려운 상황이라면 코드 전체를 zip으로 묶어 Drive에 올리고, 파라미터 셀의
+   `CODE_ZIP` 에 그 경로를 적습니다. 압축 안에 최상위 폴더가 하나만 있어도 알아서 펼칩니다.
+
+이미 코드를 받아 둔 상태라면 `git pull --ff-only` 로 갱신만 합니다. 갱신이 실패하더라도 멈추지
+않고 기존 코드를 그대로 사용합니다.
+"""))
+
+    cells.append(code(CODE_FETCH))
+
     cells.append(code(BOOT))
+
+    cells.append(code(CODE_VERSION_LOG + r'''
+
+# --- 고정 split이 있으면 표본 수를 실제 값으로 맞춥니다 ---
+_split_path = Path("artifacts/data/split_v1.json")
+if _split_path.exists():
+    _split = json.loads(_split_path.read_text(encoding="utf-8"))
+    N_TRAIN_SAMPLES = len(_split["train_ids"])
+    N_VAL_ITEMS = len(_split["val_ids"])
+    print("고정 split을 읽어서 표본 수를 갱신했습니다: train %d / val %d"
+          % (N_TRAIN_SAMPLES, N_VAL_ITEMS))
+else:
+    print("%s 이 아직 없어서 파라미터 셀의 기본값을 그대로 씁니다: train %d / val %d"
+          % (_split_path, N_TRAIN_SAMPLES, N_VAL_ITEMS))
+'''))
 
     cells.append(md("""
 ## 2. 자원 기록
@@ -1643,20 +1855,13 @@ RESOURCES["cu_expiry"] = CU_EXPIRY
 
 Drive를 그대로 읽으면 작은 파일을 반복해서 읽을 때 매우 느립니다. 압축 파일을 런타임 로컬
 디스크에 풀어 놓고, 학습과 추론은 로컬 경로만 사용합니다. 이미 풀려 있으면 건너뜁니다.
+
+압축 파일에 암호가 걸려 있지 않다면 파라미터 셀의 `ARCHIVE_PASSWORD` 에 `none` 이라고 적으십시오.
+그러면 입력을 받지 않고 그대로 풉니다. 압축 안에 최상위 폴더가 하나만 있는 경우에는 그 폴더를
+데이터 위치로 삼습니다.
 """))
 
-    cells.append(code(r'''
-import getpass
-
-data_root = Path(DATA_ROOT)
-already = (data_root / "train.csv").exists() and (data_root / "train").is_dir()
-
-if already:
-    print("이미 데이터가 준비되어 있습니다:", data_root)
-else:
-    pwd = ARCHIVE_PASSWORD or getpass.getpass("압축 파일 비밀번호를 입력하십시오: ")
-    data_root.mkdir(parents=True, exist_ok=True)
-    run(["7z", "x", "-y", "-p" + pwd, "-o" + str(data_root), ARCHIVE_PATH])
+    cells.append(code(DATA_STAGE + r'''
 
 for name in ("train.csv", "test.csv", "dev.csv", "sample_submission.csv"):
     p = data_root / name
@@ -1666,8 +1871,7 @@ for name in ("train", "test", "dev"):
     n = len(list(p.glob("*.jpg"))) if p.is_dir() else 0
     print("%-24s 이미지 %d장" % (name + "/", n))
 
-os.environ["VQA_DATA_ROOT"] = str(data_root)
-DATA_ROOT_P = data_root
+print("VQA_DATA_ROOT:", os.environ["VQA_DATA_ROOT"])
 '''))
 
     cells.append(md("""
@@ -1794,6 +1998,19 @@ else:
 
 print("감지된 VRAM %.1fGB -> %s (%s)" % (vram, CONFIG, PRECISION))
 print("config 존재:", Path(CONFIG).exists())
+
+# 21번 노트북이 같은 config를 그대로 쓰도록 선택 결과를 남깁니다.
+COLAB_CHOICE = {
+    "config": CONFIG,
+    "precision": PRECISION,
+    "vram_gb": vram,
+    "gpu_name": RESOURCES.get("gpu_name"),
+    "code_version": CODE_VERSION,
+    "decided_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+}
+(RUN_ROOT_P / "colab_choice.json").write_text(
+    json.dumps(COLAB_CHOICE, ensure_ascii=False, indent=2), encoding="utf-8")
+print("선택 결과를 저장했습니다:", RUN_ROOT_P / "colab_choice.json")
 '''))
 
     cells.append(md("""
@@ -2009,7 +2226,7 @@ Pro+ 구독은 백그라운드 실행을 제공한다고 안내되어 있습니�
 
 브라우저를 닫았다가 돌아왔거나 연결이 끊겼다면 아래 순서대로 진행하십시오.
 
-1. 파라미터 셀과 Drive 연결 셀, 부트스트랩 셀을 실행합니다.
+1. 파라미터 셀과 Drive 연결 셀, 코드 가져오기 셀, 부트스트랩 셀을 실행합니다.
 2. `jobs status` 셀을 실행해서 프로세스가 살아 있는지 확인합니다.
 3. 살아 있으면 감시 셀만 실행하고 기다립니다. 추가로 할 일은 없습니다.
 4. 프로세스가 없고 `/content` 의 데이터도 사라졌다면 가상 머신이 회수된 것입니다. 데이터 준비
@@ -2020,6 +2237,9 @@ Pro+ 구독은 백그라운드 실행을 제공한다고 안내되어 있습니�
     cells.append(code(r'''
 # ===== 파라미터 =====
 PROJECT_ROOT = "/content/ssafy-16-2-ai"
+REPO_URL = "https://github.com/bnbong/Astralopithecus.git"   # 비공개 저장소입니다.
+REPO_BRANCH = "main"
+CODE_ZIP = ""                                     # 토큰을 쓸 수 없을 때 사용할 Drive의 코드 zip 경로
 DRIVE_MOUNT = "/content/drive"
 DRIVE_DIR = "/content/drive/MyDrive/vqa"
 ARCHIVE_PATH = "/content/drive/MyDrive/ssafy-16-2-ai.zip"
@@ -2028,9 +2248,9 @@ ARCHIVE_PASSWORD = ""
 LOCAL_SCRATCH = "/content/scratch"
 DATA_ROOT = "/content/data"
 RUN_ROOT = "/content/drive/MyDrive/vqa/runs"
-MODEL_ROOT = "/content/drive/MyDrive/vqa/hf_cache"
+MODEL_ROOT = "/content/drive/MyDrive/vqa/hf_cache"   # model_snapshot.json이 있으면 덮어씁니다.
 
-CONFIG = "configs/colab_qwen35_27b_nf4.yaml"   # 20번 노트북이 고른 값을 그대로 적습니다.
+CONFIG = "configs/colab_qwen35_27b_nf4.yaml"   # colab_choice.json이 있으면 그 값으로 덮어씁니다.
 BASE_RUN_ID = "colab27b_base_v1"
 FT_RUN_ID = "colab27b_ft_v1"
 SPLIT_FILE = "artifacts/data/split_v1.json"
@@ -2050,10 +2270,64 @@ drive.mount(DRIVE_MOUNT)
 print("Drive를 연결했습니다.")
 '''))
 
+    cells.append(md("""
+### 0-0. 코드 가져오기
+
+가상 머신이 회수되면 `/content` 아래가 전부 사라지므로 코드도 함께 사라집니다. 부트스트랩 셀이
+`PROJECT_ROOT` 로 작업 디렉터리를 옮기기 전에 이 셀로 코드를 먼저 확보해야 합니다. 인증 준비
+방법은 `20_colab_27b_setup_preflight.ipynb` 의 1-1절에 정리되어 있습니다. 요약하면 이 저장소에만
+Contents 읽기 권한을 준 fine-grained personal access token을 Colab 비밀 `GITHUB_TOKEN` 으로
+등록하거나, 코드 zip을 Drive에 올리고 `CODE_ZIP` 에 경로를 적으면 됩니다.
+
+주의할 점이 하나 있습니다. 이미 돌고 있는 job은 이미 읽어 들인 코드로 계속 실행되므로, 지금
+`git pull` 을 해도 그 job은 영향을 받지 않습니다. 다만 코드나 config가 바뀐 상태에서 job을 다시
+띄우면 `--resume auto` 가 config 해시 불일치를 이유로 재개를 거부할 수 있습니다. 따라서 코드
+갱신은 job과 job 사이, 즉 실행 중인 작업이 없을 때에만 하십시오.
+"""))
+
+    cells.append(code(CODE_FETCH))
+
     cells.append(code(BOOT))
 
+    cells.append(code(CODE_VERSION_LOG + r'''
+
+# --- 20번 노트북이 내린 결정을 그대로 따릅니다 ---
+_snap_path = RUN_ROOT_P / "model_snapshot.json"
+if _snap_path.exists():
+    _snap = json.loads(_snap_path.read_text(encoding="utf-8"))
+    _cache_dir = _snap.get("cache_dir") or ""
+    if _cache_dir and Path(_cache_dir).is_dir():
+        MODEL_ROOT = _cache_dir
+        print("20번 노트북이 쓴 가중치 캐시를 그대로 사용합니다:", MODEL_ROOT)
+    else:
+        MODEL_ROOT = "/content/hf_cache"
+        print("20번 노트북이 기록한 캐시 %s 가 이 런타임에는 없습니다." % (_cache_dir or "(미기록)"))
+        print("로컬 캐시 %s 를 대신 사용합니다. 가중치를 다시 내려받으므로 수십 분이 걸릴 수 있습니다."
+              % MODEL_ROOT)
+else:
+    print("model_snapshot.json이 없습니다. 파라미터 셀의 MODEL_ROOT를 그대로 사용합니다.")
+
+MODEL_ROOT_P = Path(MODEL_ROOT)
+MODEL_ROOT_P.mkdir(parents=True, exist_ok=True)
+os.environ["VQA_MODEL_ROOT"] = str(MODEL_ROOT_P)
+os.environ["HF_HOME"] = str(MODEL_ROOT_P)
+
+_choice_path = RUN_ROOT_P / "colab_choice.json"
+if _choice_path.exists():
+    _choice = json.loads(_choice_path.read_text(encoding="utf-8"))
+    if _choice.get("config"):
+        CONFIG = _choice["config"]
+        print("20번 노트북이 고른 config를 적용합니다: %s (%s)"
+              % (CONFIG, _choice.get("precision", "정밀도 미기록")))
+else:
+    print("colab_choice.json이 없습니다. 파라미터 셀의 CONFIG를 그대로 사용합니다.")
+
+print("적용 중인 config :", CONFIG)
+print("가중치 캐시      :", os.environ["VQA_MODEL_ROOT"])
+'''))
+
     cells.append(code(r'''
-JOB_EXTRA = ["--auto-restart", str(AUTO_RESTART)] if AUTO_RESTART else []
+JOB_EXTRA =["--auto-restart", str(AUTO_RESTART)] if AUTO_RESTART else []
 ALSO_BASE_ARGS = ["--also-base"] if ALSO_BASE else []
 
 OVERRIDES = []
@@ -2111,24 +2385,16 @@ if not data_ok:
 ### 0-2. 가상 머신이 회수된 경우의 데이터 재준비
 
 이 셀을 실행한 뒤에 원래 실행했던 시작 셀을 그대로 다시 실행하면 됩니다. checkpoint는 Drive에
-남아 있으므로 학습은 저장된 step부터 이어집니다.
+남아 있으므로 학습은 저장된 step부터 이어집니다. 압축 파일에 암호가 없다면 파라미터 셀의
+`ARCHIVE_PASSWORD` 에 `none` 이라고 적으십시오.
 """))
 
-    cells.append(code(r'''
-import getpass
-
-data_root = Path(DATA_ROOT)
-if (data_root / "train.csv").exists():
-    print("데이터가 이미 있습니다. 이 셀은 건너뛰어도 됩니다.")
-else:
-    pwd = ARCHIVE_PASSWORD or getpass.getpass("압축 파일 비밀번호를 입력하십시오: ")
-    data_root.mkdir(parents=True, exist_ok=True)
-    run(["7z", "x", "-y", "-p" + pwd, "-o" + str(data_root), ARCHIVE_PATH])
-    print("데이터를 다시 준비했습니다.")
+    cells.append(code(DATA_STAGE + r'''
 
 for name in ("train", "test", "dev"):
     p = data_root / name
     print("%-8s 이미지 %d장" % (name, len(list(p.glob("*.jpg"))) if p.is_dir() else 0))
+print("VQA_DATA_ROOT:", os.environ["VQA_DATA_ROOT"])
 '''))
 
     cells.append(md("""
