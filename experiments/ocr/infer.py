@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""VQA 4지선다 추론 스크립트 - OCR 프롬프트 실험용 (ocr_files 전용, SSAFY AI 챌린지 2회차)
+"""VQA 4지선다 추론 스크립트 - OCR 프롬프트 실험용 (experiments/ocr 전용, SSAFY AI 챌린지 2회차)
 
 infer_val.py 의 방식(정답을 생성하지 않고 프롬프트 직후 첫 토큰에서 a/b/c/d 네 글자의
 로짓만 비교, --split 기반 필터링, 이어쓰기 지원)을 그대로 참고해 새로 작성했다.
 기존 infer_val.py / eval_val.py 는 읽기만 하고 수정하지 않는다.
 
 p3 는 이미지에서 OCR(EasyOCR)로 뽑은 텍스트를 프롬프트에 함께 넣는 버전이다.
-OCR 은 이미지 경로 기준으로 ocr_files/ocr_cache.json 에 캐시해서, 같은 이미지를
+OCR 은 이미지 경로 기준으로 experiments/ocr/ocr_cache.json 에 캐시해서, 같은 이미지를
 여러 문항/여러 실행에서 다시 만나도 한 번만 돌린다.
 
 사용 예 (val_fold0 기준):
-    python ocr_files/infer.py --csv data/train.csv --split fold_csv_files/val_fold0.csv \
-        --data-dir data --model ocr_files/models/Qwen2.5-VL-3B-Instruct \
-        --prompt p3 --out ocr_files/preds/preds_qwen3b_p3_fold0.csv
+    python experiments/ocr/infer.py --csv data/train.csv --split fold_csv_files/val_fold0.csv \
+        --data-dir data --model experiments/ocr/models/Qwen2.5-VL-3B-Instruct \
+        --prompt p3 --out experiments/ocr/preds/preds_qwen3b_p3_fold0.csv
 
-먼저 5문항으로 동작 확인: ... --limit 5 --out ocr_files/preds/preds_try.csv
+먼저 5문항으로 동작 확인: ... --limit 5 --out experiments/ocr/preds/preds_try.csv
 
 중간에 끊겨도 같은 명령을 다시 실행하면 이미 끝난 id 는 건너뛰고 이어서 진행한다.
 주의: test.csv 에는 정답이 없다. test 로 학습하거나 튜닝하지 않는다(규칙: Data Leakage 금지).

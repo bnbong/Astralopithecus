@@ -3,7 +3,7 @@
 공식 분할은 `split_fold0.json` 하나입니다. 이 파일은 `scripts/folds_to_split.py`가
 `fold_csv_files/val_fold0.csv`(검증 1,344문항)와 `fold_csv_files/train_fold1234.csv`(학습
 5,358문항)를 읽어서 만듭니다. 검증 id 목록만 따로 필요하면 같은 스크립트가 함께 쓰는
-`val_fold0_ids.txt`를 사용하시면 됩니다. 분할 방식은 `fold_csv_files/데이터처리_검증분할.md`에
+`val_fold0_ids.txt`를 사용하시면 됩니다. 분할 방식은 `docs/data_split_by_team.md`에
 정리되어 있습니다.
 
 전체 학습용 분할인 `split_full.json`은 같은 스크립트를 `--scope full`로 돌려서 만듭니다.

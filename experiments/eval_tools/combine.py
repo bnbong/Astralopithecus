@@ -19,14 +19,14 @@
 
 사용 예
   # validation에서 후보 비교만
-  python scripts/combine.py \
+  python experiments/eval_tools/combine.py \
       --val-base27 artifacts/preds/base27_val.csv \
       --val-ft27  artifacts/preds/ft27_val.csv \
       --val-ft9   artifacts/preds/ft9_val.csv \
       --gold train.csv --val-ids artifacts/data/val_ids.txt
 
   # 선택한 가중치를 test 확률에 적용해 결합 파일 만들기
-  python scripts/combine.py \
+  python experiments/eval_tools/combine.py \
       --val-base27 artifacts/preds/base27_val.csv \
       --val-ft27  artifacts/preds/ft27_val.csv \
       --val-ft9   artifacts/preds/ft9_val.csv \
@@ -47,7 +47,7 @@ from pathlib import Path
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from vqa.evaluate import (  # noqa: E402
     DEFAULT_EXPERIMENTS_LOG,

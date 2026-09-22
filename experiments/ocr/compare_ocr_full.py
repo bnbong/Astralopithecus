@@ -5,7 +5,7 @@ extract_npn.py 의 키워드 분류를 재사용해 전체 문항에 이름/가�
 유형을 매기고, p2 대비 p4 가 유형별로 어디서 이기고 지는지 살펴본다.
 
 사용법:
-    python ocr_files/compare_ocr_full.py
+    python experiments/ocr/compare_ocr_full.py
 """
 import re
 
@@ -54,12 +54,12 @@ def main():
     sub = train[train["id"].isin(val_ids)].copy()
     sub["primary_type"] = sub["question"].map(primary_type)
 
-    p2 = pd.read_csv("ocr_files/preds/preds_qwen3b_p2_fold0.csv", dtype=str,
+    p2 = pd.read_csv("experiments/ocr/preds/preds_qwen3b_p2_fold0.csv", dtype=str,
                       keep_default_na=False, encoding="utf-8-sig")
     p2["id"] = p2["id"].map(norm_id)
     p2 = p2[["id", "pred"]].rename(columns={"pred": "p2_pred"})
 
-    p4 = pd.read_csv("ocr_files/preds/preds_qwen3b_p4_fold0_full.csv", dtype=str,
+    p4 = pd.read_csv("experiments/ocr/preds/preds_qwen3b_p4_fold0_full.csv", dtype=str,
                       keep_default_na=False, encoding="utf-8-sig")
     p4["id"] = p4["id"].map(norm_id)
     p4 = p4[["id", "pred"]].rename(columns={"pred": "p4_pred"})
@@ -102,9 +102,9 @@ def main():
                         f"p2={r['p2_pred']} p4={r['p4_pred']}\n")
                 f.write(f"  Q: {r['question']}\n")
 
-    dump(helped, "ocr_files/_tmp_helped_full.txt")
-    dump(hurt, "ocr_files/_tmp_hurt_full.txt")
-    print("\n예시 저장: ocr_files/_tmp_helped_full.txt, ocr_files/_tmp_hurt_full.txt")
+    dump(helped, "experiments/ocr/_tmp_helped_full.txt")
+    dump(hurt, "experiments/ocr/_tmp_hurt_full.txt")
+    print("\n예시 저장: experiments/ocr/_tmp_helped_full.txt, experiments/ocr/_tmp_hurt_full.txt")
 
 
 if __name__ == "__main__":

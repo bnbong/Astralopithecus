@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""검증 세트 평가 스크립트 - OCR 프롬프트 실험용 (ocr_files 전용, SSAFY AI 챌린지 2회차)
+"""검증 세트 평가 스크립트 - OCR 프롬프트 실험용 (experiments/ocr 전용, SSAFY AI 챌린지 2회차)
 
 eval_val.py 의 방식(id 기준 채점, 오답 목록 저장, 로그 누적)을 그대로 참고해 새로
 작성했다. 기존 eval_val.py 는 읽기만 하고 수정하지 않는다.
 
 사용법:
-    python ocr_files/eval.py --pred ocr_files/preds/preds_qwen3b_p3_fold0.csv \
+    python experiments/ocr/eval.py --pred experiments/ocr/preds/preds_qwen3b_p3_fold0.csv \
         --split fold_csv_files/val_fold0.csv --labels data/train.csv \
         --model qwen3b --prompt p3 --split-name fold0 \
-        --log-csv ocr_files/results_log.csv
+        --log-csv experiments/ocr/results_log.csv
 
 입력:
     --pred    예측 파일. id 와 pred(또는 answer) 컬럼 필수.

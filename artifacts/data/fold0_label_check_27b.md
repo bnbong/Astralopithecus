@@ -5,8 +5,10 @@
 27B 학습 모델 두 종(ft_v1, ft_p2)이 fold 0에서 공통으로 틀린 47문항을 대상으로, 수빈 님이
 이미지와 선택지를 직접 대조해 라벨의 타당성을 점검했습니다. 원본 CSV는
 `fold0_hard_27b_label_check.csv`이며, 이 문서가 참조하는 `fold0_label_check_27b.csv`는
-질문·선택지·점검 메모를 제외하고 id, label_check, ft_v1_pred, ft_p2_pred, answer 다섯
-컬럼만 남긴 사본입니다.
+질문·선택지·점검 메모를 제외하고 id, label_check, ft_v1_pred, ft_p2_pred 네 컬럼만 남긴
+사본입니다. 대회 데이터의 정답 글자가 담겨 있던 answer 컬럼은 저작권 문제를 피하려고
+저장소에서 제거했으므로, 정답과 대조해야 하는 계산은 원본 CSV를 가지고 있는 팀 내부에서만
+수행할 수 있습니다.
 
 ## 점검 결과 분포
 

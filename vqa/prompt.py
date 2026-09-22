@@ -55,7 +55,7 @@ def _user_text_ocr(question: str, options: Sequence[str], ocr: str | None) -> st
     return f"질문: {question}\n{_format_options(options)}{block}\n\n{_BASE_TAIL}"
 
 
-#: p2의 첫 문장. infer_val.py의 PROMPTS["p2"]와 글자 단위로 같아야 한다.
+#: p2의 첫 문장. experiments/eval_tools/infer_val.py의 PROMPTS["p2"]와 글자 단위로 같아야 한다.
 _P2_LEAD = "이미지를 자세히 보고, 이미지에 적힌 글자를 정확히 읽어서 질문에 답하세요."
 
 #: p2의 마지막 문장.

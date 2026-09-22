@@ -6,7 +6,7 @@
 - 유형(name/price/number)별 위 두 그룹 건수
 
 사용법:
-    python ocr_files/compare_ocr.py
+    python experiments/ocr/compare_ocr.py
 """
 import re
 
@@ -20,7 +20,7 @@ def norm_id(x):
 
 
 def main():
-    sample = pd.read_csv("ocr_files/fold0_name_price_number.csv", dtype=str,
+    sample = pd.read_csv("experiments/ocr/fold0_name_price_number.csv", dtype=str,
                           keep_default_na=False, encoding="utf-8-sig")
     sample["id"] = sample["id"].map(norm_id)
 
@@ -29,12 +29,12 @@ def main():
     labels["id"] = labels["id"].map(norm_id)
     labels["answer"] = labels["answer"].str.strip().str.lower()
 
-    p2 = pd.read_csv("ocr_files/preds/preds_qwen3b_p2_fold0.csv", dtype=str,
+    p2 = pd.read_csv("experiments/ocr/preds/preds_qwen3b_p2_fold0.csv", dtype=str,
                       keep_default_na=False, encoding="utf-8-sig")
     p2["id"] = p2["id"].map(norm_id)
     p2 = p2[p2["id"].isin(set(sample["id"]))][["id", "pred"]].rename(columns={"pred": "p2_pred"})
 
-    p4 = pd.read_csv("ocr_files/preds/preds_qwen3b_p4_fold0_npn.csv", dtype=str,
+    p4 = pd.read_csv("experiments/ocr/preds/preds_qwen3b_p4_fold0_npn.csv", dtype=str,
                       keep_default_na=False, encoding="utf-8-sig")
     p4["id"] = p4["id"].map(norm_id)
     p4 = p4[["id", "pred"]].rename(columns={"pred": "p4_pred"})
@@ -68,9 +68,9 @@ def main():
                         f"p2={r['p2_pred']} p4={r['p4_pred']}\n")
                 f.write(f"  Q: {r['question']}\n")
 
-    dump(helped, "ocr_files/_tmp_helped_examples.txt")
-    dump(hurt, "ocr_files/_tmp_hurt_examples.txt")
-    print("\n예시 저장: ocr_files/_tmp_helped_examples.txt, ocr_files/_tmp_hurt_examples.txt")
+    dump(helped, "experiments/ocr/_tmp_helped_examples.txt")
+    dump(hurt, "experiments/ocr/_tmp_hurt_examples.txt")
+    print("\n예시 저장: experiments/ocr/_tmp_helped_examples.txt, experiments/ocr/_tmp_hurt_examples.txt")
 
 
 if __name__ == "__main__":

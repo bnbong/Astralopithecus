@@ -32,7 +32,7 @@ LETTERS: tuple[str, ...] = ("a", "b", "c", "d")
 PROB_COLUMNS: tuple[str, ...] = ("p_a", "p_b", "p_c", "p_d")
 PRED_COLUMNS: tuple[str, ...] = ("id", *PROB_COLUMNS, "run_id")
 
-#: 팀원 도구(infer_val.py, eval_val.py)가 쓰는 확률 컬럼 이름.
+#: 팀원 도구(experiments/eval_tools/infer_val.py, experiments/eval_tools/eval_val.py)가 쓰는 확률 컬럼 이름.
 TEAMMATE_PROB_COLUMNS: tuple[str, ...] = ("prob_a", "prob_b", "prob_c", "prob_d")
 
 #: 팀원 파일에만 있고 vqa 형식에는 없는 컬럼. alias 변환 때만 버린다.

@@ -208,7 +208,7 @@ zip으로 묶고 파일 이름에 날짜와 시각을 넣어서 어느 버전인
 `id` 컬럼 하나만 들어 있습니다. 학습에는 `fold_csv_files/train_fold1234.csv` 의 5,358문항을
 씁니다. 이 파일에서는 test와 이미지가 완전히 같은 train 24문항을 이미 빼 두었습니다. 분할은
 이미지 MD5를 그룹 키로 쓰는 StratifiedGroupKFold 5-fold 결과이며, 근거는
-`fold_csv_files/데이터처리_검증분할.md` 에 정리되어 있습니다.
+`docs/data_split_by_team.md` 에 정리되어 있습니다.
 
 두 CSV를 합쳐서 `vqa.train --split` 에 넘길 JSON을 만드는 명령은 다음과 같습니다.
 
@@ -295,7 +295,7 @@ python scripts/evaluate_run.py --pred <RUN_ROOT>/colab27b_base_bf16/preds/fold0_
 
 팀원 도구인 `infer_val.py` 와 `eval_val.py` 는 `id, pred, prob_a~prob_d` 를 쓰고, `vqa` 패키지는
 `id, p_a~p_d, run_id` 를 씁니다. `vqa.predictions.load_predictions` 가 두 이름을 모두 읽으므로,
-`scripts/combine.py` 와 `scripts/evaluate_run.py` 에는 팀원 파일을 그대로 넘겨도 됩니다.
+`experiments/eval_tools/combine.py` 와 `scripts/evaluate_run.py` 에는 팀원 파일을 그대로 넘겨도 됩니다.
 `run_id` 가 없는 파일은 `unknown` 으로 채워집니다.
 
 파일 자체를 바꿔야 한다면 다음 명령을 쓰십시오.
@@ -304,3 +304,62 @@ python scripts/evaluate_run.py --pred <RUN_ROOT>/colab27b_base_bf16/preds/fold0_
 python scripts/convert_preds.py --to teammate --in <vqa 형식 CSV> --out <팀원 형식 CSV>
 python scripts/convert_preds.py --to vqa --in <팀원 형식 CSV> --out <vqa 형식 CSV> --run-id <run_id>
 ```
+
+## 11. 실습실 PC 설치 요약
+
+실습실 PC는 Windows이고 GPU는 Blackwell 세대인 RTX 5060 Ti 16GB입니다. 따라서 torch는 반드시
+cu128 빌드를 설치해야 합니다. 실습실에서 인터넷을 쓸 수 있으므로 pip 설치와 Hugging Face
+다운로드가 모두 동작합니다.
+
+```
+git clone git@github.com:bnbong/Astralopithecus.git
+cd Astralopithecus
+conda create -n vqa-tf5 python=3.11 -y && conda activate vqa-tf5   # 파이썬 버전은 docs/lab_setup.md 참고
+pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.11.0 torchvision==0.26.0
+pip install -r requirements/lab_windows_tf5.txt
+```
+
+Qwen3.5는 transformers 5.x에서만 로드되기 때문에 환경을 두 개로 나눕니다. `vqa-tf4`는
+transformers 4.x로 Qwen2.5-VL-3B baseline을 돌리고, `vqa-tf5`는 transformers 5.x로 Qwen3.5
+계열을 돌립니다. Colab에서는 `requirements/colab.txt`와 `requirements/colab-nodeps.txt`를 함께
+쓰며, 뒤의 파일은 반드시 `pip install --no-deps -r`로 설치해야 합니다. 여기에 들어 있는 fla 계열
+패키지가 자기 의존성으로 torch와 triton을 다시 끌어오기 때문입니다. 이 패키지가 빠지면 Qwen3.5의
+Gated DeltaNet이 PyTorch 참조 구현으로 내려가서 학습이 약 네 배 느려집니다. 20번과 21번 노트북의
+환경 설치 셀이 이 순서를 그대로 수행하고 설치 결과를 별도 프로세스에서 확인합니다. 설치가 끝나면
+무엇보다 먼저 `notebooks/00_lab_env_check.ipynb`를 실행하십시오. 이 노트북이 통과해야 나머지가
+동작합니다. 상세한 절차는 `docs/lab_setup.md`에 있습니다.
+
+데이터셋은 저장소에 들어 있지 않으므로 팀 내부 경로로 받아서 `train/`, `test/`, `dev/` 폴더와
+`train.csv`, `test.csv`, `dev.csv`, `sample_submission.csv`를 프로젝트 루트에 놓습니다. 다른
+위치에 두었다면 환경 변수 `VQA_DATA_ROOT`에 그 경로를 지정하십시오.
+
+## 12. 자주 쓰는 명령
+
+```
+python scripts/folds_to_split.py
+python -m vqa.train --config configs/lab_qwen35_9b.yaml --run-id ft9_v1 --split artifacts/data/split_fold0.json
+python -m vqa.jobs start --name ft9_v1 --auto-restart 5 --min-free-gb 20 -- python -m vqa.train --config configs/lab_qwen35_9b.yaml --run-id ft9_v1
+python -m vqa.jobs status --name ft9_v1
+python -m vqa.jobs wait --name ft9_v1 --poll 30
+python -m vqa.jobs stop --name ft9_v1
+python -m vqa.predict --config configs/lab_qwen35_9b.yaml --run-id ft9_v1 --csv test.csv --out-name ft9_test
+python -m vqa.submit --pred artifacts/preds/combined_test.csv --sample sample_submission.csv --out artifacts/submission/final.csv
+python scripts/check_submission.py --submission artifacts/submission/final.csv --sample sample_submission.csv
+python scripts/compare_predictions.py --pred-a artifacts/preds/base27_val.csv --pred-b artifacts/preds/ft27_val.csv --gold train.csv --val-ids fold_csv_files/val_fold0.csv
+```
+
+`vqa.train` 명령을 똑같이 다시 실행하면 마지막으로 완결된 checkpoint에서 이어집니다.
+`--resume auto`가 기본값이므로 명령을 고칠 필요가 없습니다. `vqa.jobs start`로 띄운 작업은 노트북
+셀을 멈추거나 브라우저를 닫아도 계속 돌아갑니다. 다만 Colab 가상 머신이 회수되면 함께 죽으므로,
+그때에는 원래 실행했던 시작 셀을 그대로 다시 실행하면 됩니다. 상황별 대응은
+`docs/colab_survival.md`에 정리되어 있습니다.
+
+GPU를 쓰는 작업은 한 번에 하나만 돌립니다. `vqa.jobs start`는 같은 run-root에 살아 있는 job이
+있으면 시작을 거부하고, `--min-free-gb N`을 붙이면 GPU 여유 메모리가 모자랄 때에도 거부합니다.
+일부러 동시에 돌려야 하면 `--allow-concurrent`를 붙입니다. `vqa.jobs wait`는 job이 끝날 때까지
+기다리며, 종료 코드는 정상 종료가 0, 실패가 1, 제한 시간 초과가 2입니다. `vqa.jobs stop`은 실제
+학습 프로세스에 SIGTERM을 전달하고, 학습은 step 경계에서 checkpoint를 저장한 다음 종료합니다.
+
+노트북 21번은 파라미터 셀 하나에서 모든 선택을 끝낸 다음 위에서 아래로 한 번에 실행하도록
+만들었습니다. GPU 단계는 job을 띄운 뒤 `vqa.jobs wait`로 기다리므로 "모두 실행"을 눌러도 작업이
+겹치지 않습니다. 다만 학습만은 열 시간 안팎이 걸리기 때문에 띄우기만 하고 기다리지 않습니다.

@@ -6,7 +6,7 @@
 random_state=42 로 무작위 300건만 뽑는다.
 
 사용법:
-    python ocr_files/extract_npn.py
+    python experiments/ocr/extract_npn.py
 """
 import re
 
@@ -62,7 +62,7 @@ def main():
     else:
         out = cand
 
-    out_path = "ocr_files/fold0_name_price_number.csv"
+    out_path = "experiments/ocr/fold0_name_price_number.csv"
     out[["id", "question", "matched_types", "primary_type"]].to_csv(
         out_path, index=False, encoding="utf-8-sig")
     print(f"저장: {out_path} ({len(out)}건)")

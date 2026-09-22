@@ -19,8 +19,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from experiments.eval_tools import combine as combine_cli  # noqa: E402
 from scripts import check_submission as check_submission_cli  # noqa: E402
-from scripts import combine as combine_cli  # noqa: E402
 from scripts import evaluate_run as evaluate_run_cli  # noqa: E402
 from scripts import make_fake_predictions as fake_cli  # noqa: E402
 from scripts import merge_shards as merge_cli  # noqa: E402
@@ -1034,7 +1034,7 @@ def test_check_submission_cli_exit_codes(
         ["scripts/make_fake_predictions.py", "--help"],
         ["scripts/merge_shards.py", "--help"],
         ["scripts/evaluate_run.py", "--help"],
-        ["scripts/combine.py", "--help"],
+        ["experiments/eval_tools/combine.py", "--help"],
         ["scripts/check_submission.py", "--help"],
         ["-m", "vqa.submit", "--help"],
     ],

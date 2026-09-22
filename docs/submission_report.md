@@ -142,7 +142,7 @@ dev는 보조 참고용으로만 쓰기로 정했습니다. 다섯 명의 응답
 ### 2.3 고정 fold 분할
 
 공식 검증셋은 train의 fold 0이며 1,344문항입니다. 분할 방식은 이미지 바이트의 MD5 해시를 그룹
-키로 삼는 StratifiedGroupKFold 5-fold입니다. 근거는 `fold_csv_files/데이터처리_검증분할.md`에
+키로 삼는 StratifiedGroupKFold 5-fold입니다. 근거는 `docs/data_split_by_team.md`에
 정리되어 있습니다.
 
 | 항목 | 값 |
@@ -228,7 +228,9 @@ fold 0 1,344문항 기준으로 라벨 문제 35건은 전체의 2.60퍼센트�
 1건입니다. 라벨 오류 6건만 정답으로 보정하고 애매함과 미점검은 그대로 오답에 남긴 보정 정확도의
 하한은 ft_v1이 1292/1321 = 0.9780, ft_p2가 1294/1321 = 0.9796입니다. 상세 판정과 유형 분해는
 `artifacts/data/fold0_label_check_27b.csv`, `artifacts/data/fold0_label_check_27b.md`,
-`artifacts/data/fold0_error_types_27b.csv`에 정리해 두었습니다.
+`artifacts/data/fold0_error_types_27b.csv`에 정리해 두었습니다. 이 가운데
+`fold0_label_check_27b.csv`는 id, label_check, ft_v1_pred, ft_p2_pred 네 컬럼만 담고 있으며,
+대회 데이터의 정답 글자가 들어 있던 answer 컬럼은 저장소에서 제거했습니다.
 
 ### 2.6 이미지 전처리
 
@@ -345,7 +347,9 @@ fold 0 정확도를 0.9159로 기록하고 있고, `docs/presentation_outline.md
 불변이 30건, 회귀가 1건이었습니다. 오답 유형이 "작은 글자와 흐린 글자"인 19건으로 좁히면
 EasyOCR의 성공률은 21퍼센트(4/19)에 그쳤고, OCR 덕분에 정답이 된 문항은 0건인 반면 정답에서
 오답으로 돌아선 문항은 2건이었습니다. 상세 판정은
-`ocr_files/test_result/ocr_verification_result.csv`에 47행으로 남아 있습니다.
+`experiments/ocr/test_result/ocr_verification_result.csv`에 47행으로 남아 있습니다. 이 파일은
+대회 데이터의 정답과 OCR이 읽어 낸 글자를 함께 담고 있으므로 저장소에는 포함하지 않으며 팀
+내부에서만 보관합니다.
 
 셋째, OCR 엔진 자체를 바꾸면 결론이 달라지는지도 확인했습니다. dev 이미지 30장으로 PaddleOCR과
 EasyOCR을 실습실 CPU에서 비교한 결과, 사람이 판정한 우열은 Paddle 우세 26장, 동률 2장, Easy 우세
@@ -581,7 +585,7 @@ Public에서는 0.66퍼센트포인트가 올랐습니다. test가 6,714문항�
 `scripts/blend_preds.py`는 `--w-a` 하나만 받아서 `확률 = w_a × A + (1 - w_a) × B`로 계산하며,
 저희는 언제나 0.5를 썼습니다. 가중치를 fold 0에서 고르면 그만큼 검증셋에 맞춰지고, 그 결과를
 다시 fold 0에서 평가하는 일이 되기 때문입니다. 최종 제출물인 ⑩도 같은 규칙을 따라 `--w-a 0.5`
-하나만 쓰고, 가중치를 바꿔 가며 Public 점수를 비교하지 않았습니다. `scripts/combine.py`도 같은 취지로 사전에
+하나만 쓰고, 가중치를 바꿔 가며 Public 점수를 비교하지 않았습니다. `experiments/eval_tools/combine.py`도 같은 취지로 사전에
 등록한 네 후보만 비교하고, 고른 가중치를 test에 그대로 적용하도록 만들었습니다.
 
 ### 4.5 검증할 수 없는 모델의 건전성 확인
@@ -858,15 +862,15 @@ python scripts/check_submission.py --submission blend_upscale_w05_submission.csv
 | `scripts/compare_predictions.py` | 같은 문항 집합에서 두 예측 파일을 문항 단위로 비교하고 McNemar 검정을 수행합니다. |
 | `scripts/evaluate_run.py` | 고정 validation ID에서 예측 파일의 정확도와 오답 분포를 보고 `artifacts/experiments.jsonl`에 기록합니다. |
 | `scripts/blend_preds.py` | 두 예측 확률을 가중 평균해 결합 예측과 제출 파일을 만듭니다. |
-| `scripts/combine.py` | 사전에 등록한 네 후보만 validation에서 비교하고 고른 가중치를 test에 그대로 적용합니다. |
+| `experiments/eval_tools/combine.py` | 사전에 등록한 네 후보만 validation에서 비교하고 고른 가중치를 test에 그대로 적용합니다. |
 | `scripts/check_submission.py` | 제출 CSV가 대회 형식을 지키는지 검사하고 sha256과 선택지 분포를 출력합니다. |
 | `scripts/convert_preds.py` | 예측 파일의 컬럼 이름을 팀원 도구 형식과 `vqa` 패키지 형식 사이에서 바꿉니다. |
 | `scripts/merge_shards.py` | 여러 대에서 만든 shard 예측 파일을 하나로 합치고 ID 대응을 검사합니다. |
 | `scripts/build_notebooks.py` | `notebooks/` 아래의 노트북을 nbformat으로 생성합니다. |
-| `scripts/review_sheet.py` | 오답 문항을 사람이 검토할 수 있도록 페이지를 만듭니다. |
+| `experiments/eval_tools/review_sheet.py` | 오답 문항을 사람이 검토할 수 있도록 페이지를 만듭니다. |
 | `scripts/make_fake_predictions.py` | GPU 없이 평가와 결합과 제출 경로를 끝까지 돌려 보기 위한 가짜 확률 파일을 만듭니다. |
 
-`scripts/infer_val.py`와 `scripts/eval_val.py`는 팀원이 먼저 만들어 쓰던 도구이며, 확률 컬럼
+`experiments/eval_tools/infer_val.py`와 `experiments/eval_tools/eval_val.py`는 팀원이 먼저 만들어 쓰던 도구이며, 확률 컬럼
 이름이 `prob_a`부터 `prob_d`까지입니다. `vqa.predictions.load_predictions`가 두 이름을 모두
 읽으므로 두 계열의 파일을 섞어서 쓸 수 있습니다.
 

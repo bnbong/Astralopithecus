@@ -263,7 +263,11 @@ def test_teammate_template_constant_matches_infer_val_source():
     import ast
 
     repo_root = Path(__file__).resolve().parents[1]
-    candidates = [repo_root / "infer_val.py", repo_root / "scripts" / "infer_val.py"]
+    candidates = [
+        repo_root / "experiments" / "eval_tools" / "infer_val.py",
+        repo_root / "infer_val.py",
+        repo_root / "scripts" / "infer_val.py",
+    ]
     infer_val_path = next((p for p in candidates if p.exists()), None)
     assert infer_val_path is not None, (
         "infer_val.py를 찾지 못했습니다 (확인한 경로: "

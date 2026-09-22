@@ -130,8 +130,9 @@ def vqa(module, *args, **kw):
 
 
 def script(name, *args, **kw):
-    """scripts/<name> 을 실행합니다."""
-    return run([PY, str(Path("scripts") / name)] + [str(a) for a in args], **kw)
+    """scripts/<name> 을 실행합니다. name 에 / 가 있으면 저장소 루트 기준 경로로 봅니다."""
+    path = Path(name) if "/" in name else Path("scripts") / name
+    return run([PY, str(path)] + [str(a) for a in args], **kw)
 
 
 def read_csv_rows(path):
@@ -798,7 +799,7 @@ vqa가 읽는 형식으로 바꿔서 내용 해시와 함께 배포하는 것입
 
 공식 분할은 팀이 이미 확정했습니다. 검증은 `fold_csv_files/val_fold0.csv`의 fold 0 1,344문항이고,
 학습은 `fold_csv_files/train_fold1234.csv`의 5,358문항입니다. 학습 파일에서는 test와 이미지가
-동일한 train 24문항을 빼 두었습니다. 분할 방식은 `fold_csv_files/데이터처리_검증분할.md`에
+동일한 train 24문항을 빼 두었습니다. 분할 방식은 `docs/data_split_by_team.md`에
 정리되어 있습니다. 이 노트북은 그 두 파일을 `artifacts/data/split_fold0.json` 하나로 합칩니다.
 검증 500문항을 쓰던 `split_v1.json`은 폐기했으니 새 실행에서는 쓰지 마십시오.
 
@@ -4209,7 +4210,7 @@ script("evaluate_run.py",
     cells.append(md("""
 ## 4. 결합
 
-`scripts/combine.py` 는 계획서 8절에서 미리 정한 네 후보만 비교합니다. 후보는 base27 단독,
+`experiments/eval_tools/combine.py` 는 계획서 8절에서 미리 정한 네 후보만 비교합니다. 후보는 base27 단독,
 ft27 단독, ft27 0.8에 base27 0.2를 더한 것, ft27 0.8에 ft9 0.2를 더한 것입니다. 가중치를 자유롭게
 탐색하지 않는 이유는 validation에 과적합되는 것을 막기 위해서입니다.
 
@@ -4241,7 +4242,7 @@ for name in ("base27", "ft27", "ft9"):
 
     cells.append(code(r"""
 FAKE_TEST_COMBINED = FAKE_DIR / "test_fake_combined.csv"
-script("combine.py",
+script("experiments/eval_tools/combine.py",
        "--val-base27", str(FAKE_DIR / "val_fake_base27.csv"),
        "--val-ft27", str(FAKE_DIR / "val_fake_ft27.csv"),
        "--val-ft9", str(FAKE_DIR / "val_fake_ft9.csv"),
@@ -4385,7 +4386,7 @@ if not (val_args and test_args):
     print("결합에는 validation과 test 확률이 모두 필요합니다.")
 else:
     REAL_SUB = "artifacts/submission/final_candidate.csv"
-    script("combine.py", *val_args, *test_args,
+    script("experiments/eval_tools/combine.py", *val_args, *test_args,
            "--gold", GOLD,
            "--val-ids", VAL_IDS_FILE,
            "--out", "artifacts/eval/real_test_combined.csv",
@@ -4409,7 +4410,7 @@ else:
     cells.append(md("""
 ## 8. 실험 기록
 
-`evaluate_run.py` 와 `combine.py` 는 실행할 때마다 `artifacts/experiments.jsonl` 에 한 줄씩
+`evaluate_run.py` 와 `experiments/eval_tools/combine.py` 는 실행할 때마다 `artifacts/experiments.jsonl` 에 한 줄씩
 덧붙입니다. 여러 사람이 동시에 기록해도 기존 내용을 덮어쓰지 않습니다.
 
 아래 셀이 그 기록을 표로 정리합니다. 마지막 날 최종본을 고를 때 이 표가 근거가 됩니다.
