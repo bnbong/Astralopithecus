@@ -1,0 +1,48 @@
+id,label_check,error_type,label_error_suspect,consensus
+train_3307.jpg,라벨 오류,기타,True,라벨 문제
+train_4748.jpg,라벨 오류,기타,True,라벨 문제
+train_1412.jpg,애매함,기타,True,라벨 문제
+train_6299.jpg,정답 맞음,글자는 읽히는데 추론이 틀림,False,모델 오류: 추론
+train_3551.jpg,라벨 오류,기타,True,라벨 문제
+train_0968.jpg,애매함,기타,True,라벨 문제
+train_2249.jpg,라벨 오류,작은 글자·흐린 글자,False,라벨 문제
+train_5975.jpg,애매함,상식·외부 지식,False,라벨 문제
+train_5301.jpg,애매함,글자는 읽히는데 추론이 틀림,False,라벨 문제
+train_1476.jpg,정답 맞음,작은 글자·흐린 글자,False,모델 오류: 작은 글자
+train_1913.jpg,정답 맞음,글자는 읽히는데 추론이 틀림,False,모델 오류: 추론
+train_4834.jpg,애매함,기타,True,라벨 문제
+train_3473.jpg,애매함,작은 글자·흐린 글자,False,라벨 문제
+train_2485.jpg,애매함,기타,True,라벨 문제
+train_1556.jpg,애매함,기타,True,라벨 문제
+train_6043.jpg,애매함,기타,True,라벨 문제
+train_2662.jpg,애매함,작은 글자·흐린 글자,False,라벨 문제
+train_6056.jpg,라벨 오류,작은 글자·흐린 글자,False,라벨 문제
+train_4526.jpg,정답 맞음,글자는 읽히는데 추론이 틀림,False,모델 오류: 추론
+train_0944.jpg,정답 맞음,글자는 읽히는데 추론이 틀림,False,모델 오류: 추론
+train_1000.jpg,정답 맞음,기타,True,라벨 문제
+train_1373.jpg,애매함,기타,True,라벨 문제
+train_2462.jpg,애매함,작은 글자·흐린 글자,False,라벨 문제
+train_5624.jpg,애매함,상식·외부 지식,False,라벨 문제
+train_6662.jpg,애매함,기타,True,라벨 문제
+train_1918.jpg,정답 맞음,작은 글자·흐린 글자,False,모델 오류: 작은 글자
+train_4874.jpg,정답 맞음,글자는 읽히는데 추론이 틀림,False,모델 오류: 추론
+train_2907.jpg,애매함,작은 글자·흐린 글자,False,라벨 문제
+train_3581.jpg,애매함,상식·외부 지식,True,라벨 문제
+train_0937.jpg,정답 맞음,작은 글자·흐린 글자,False,모델 오류: 작은 글자
+train_0491.jpg,정답 맞음,글자는 읽히는데 추론이 틀림,False,모델 오류: 추론
+train_0408.jpg,애매함,기타,True,라벨 문제
+train_0917.jpg,애매함,작은 글자·흐린 글자,False,라벨 문제
+train_0794.jpg,정답 맞음,작은 글자·흐린 글자,False,모델 오류: 작은 글자
+train_5574.jpg,정답 맞음,글자는 읽히는데 추론이 틀림,False,모델 오류: 추론
+train_5811.jpg,애매함,기타,True,라벨 문제
+train_5007.jpg,정답 맞음,작은 글자·흐린 글자,False,모델 오류: 작은 글자
+train_4576.jpg,정답 맞음,작은 글자·흐린 글자,False,모델 오류: 작은 글자
+train_6560.jpg,애매함,기타,True,라벨 문제
+train_2297.jpg,애매함,작은 글자·흐린 글자,False,라벨 문제
+train_5455.jpg,정답 맞음,작은 글자·흐린 글자,False,모델 오류: 작은 글자
+train_2186.jpg,라벨 오류,작은 글자·흐린 글자,False,라벨 문제
+train_0775.jpg,애매함,작은 글자·흐린 글자,False,라벨 문제
+train_2542.jpg,애매함,세기(counting),False,라벨 문제
+train_4091.jpg,정답 맞음,작은 글자·흐린 글자,False,모델 오류: 작은 글자
+train_6612.jpg,정답 맞음,작은 글자·흐린 글자,False,모델 오류: 작은 글자
+train_2411.jpg,미점검,글자는 읽히는데 추론이 틀림,False,미점검

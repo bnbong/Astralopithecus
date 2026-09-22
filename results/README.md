@@ -55,7 +55,10 @@
 걸러 내면 실제 모델 오류는 17건, 1.26퍼센트로 줄어듭니다. test에도 같은 비율로 라벨 문제가
 있다고 가정하면 Public 점수의 상한은 약 0.978로 추정됩니다. 상세 판정과 유형 분해는
 `artifacts/data/fold0_label_check_27b.csv`와 `artifacts/data/fold0_label_check_27b.md`에
-정리해 두었습니다.
+정리해 두었습니다. 같은 47문항을 창혁 님도 독립적으로 점검해 오답 유형(작은 글자·흐린
+글자, 추론 오류 등)과 라벨 오류 의심 여부로 분류했습니다(임시본). 두 사람의 판정을 id
+기준으로 합친 consensus 결과는 `artifacts/data/fold0_error_types_27b.csv`에 정리해
+두었습니다.
 
 ## fla 가속 커널 설치 전후 비교 (A100 80GB, bf16, LoRA)
 
