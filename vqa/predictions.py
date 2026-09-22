@@ -157,6 +157,7 @@ def build_manifest(
     precision: str | None = None,
     prompt_id: str | None = None,
     prompt_hash: str | None = None,
+    min_pixels: int | None = None,
     max_pixels: int | None = None,
     shard_index: int | None = None,
     shard_count: int | None = None,
@@ -172,6 +173,9 @@ def build_manifest(
         "precision": precision,
         "prompt_id": prompt_id,
         "prompt_hash": prompt_hash,
+        # 해상도 하한과 상한을 둘 다 남긴다. min_pixels만 올린 확대본 설정과 기본 설정은
+        # max_pixels가 같아서, 하한을 적지 않으면 두 실행을 구분할 수 없다.
+        "min_pixels": min_pixels,
         "max_pixels": max_pixels,
         "shard_index": shard_index,
         "shard_count": shard_count,

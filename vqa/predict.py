@@ -93,6 +93,127 @@ def output_path(
 
 
 # --------------------------------------------------------------------------
+# 순열 적용 범위
+# --------------------------------------------------------------------------
+
+
+#: 선택지를 섞지 않는 순열.
+IDENTITY_PERM: tuple[int, ...] = (0, 1, 2, 3)
+
+
+def resolve_perms(
+    records: Sequence[VQARecord], perm: Sequence[int]
+) -> list[tuple[int, ...]]:
+    """문항마다 실제로 적용할 순열을 정한다.
+
+    '위의 모두'처럼 보기의 순서에 기대는 문항은 선택지를 섞으면 문제 자체가 달라지므로,
+    학습 경로(`collator.permuted_view`)와 똑같은 기준으로 원래 순서를 유지한다. 확률을
+    되돌릴 때에도 같은 항등 순열을 써야 자리가 어긋나지 않는다.
+    """
+    requested = tuple(perm)
+    return [
+        IDENTITY_PERM if collator_mod.is_order_dependent(record.options) else requested
+        for record in records
+    ]
+
+
+def invert_probs_per_record(shown_probs, perms: Sequence[Sequence[int]]):
+    """문항마다 다른 순열로 화면 순서 확률을 원래 a~d 순서로 되돌린다."""
+    import numpy as np
+
+    shown = np.asarray(shown_probs)
+    original = np.zeros_like(shown)
+    for index, record_perm in enumerate(perms):
+        original[index] = collator_mod.invert_probs(shown[index], record_perm)
+    return original
+
+
+# --------------------------------------------------------------------------
+# 재개 안전장치
+# --------------------------------------------------------------------------
+
+
+#: 예측 파일을 이어 쓸 때 manifest와 지금 설정이 반드시 같아야 하는 키.
+RESUME_CRITICAL_KEYS: tuple[str, ...] = (
+    "model_id",
+    "model_revision",
+    "adapter",
+    "prompt_id",
+    "prompt_hash",
+    "precision",
+    "min_pixels",
+    "max_pixels",
+)
+
+
+class ResumeMismatch(RuntimeError):
+    """이미 있는 예측 파일이 지금 설정과 다른 조건에서 만들어졌을 때 발생한다."""
+
+
+def _normalize_manifest_value(value: Any) -> Any:
+    """manifest 값과 config 값을 같은 기준으로 비교하기 위해 형태를 맞춘다."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value).strip()
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+
+def check_resume_manifest(
+    manifest: dict[str, Any] | None,
+    expected: dict[str, Any],
+    *,
+    source: str,
+) -> list[str]:
+    """이어 쓰려는 예측 파일의 manifest가 지금 설정과 맞는지 본다.
+
+    manifest에 키 자체가 없으면 옛 형식이므로 경고만 남기고 넘어간다. 키가 있는데 값이
+    다르면 조건이 다른 예측이 한 파일에 섞이는 것이므로 즉시 멈춘다.
+
+    Returns:
+        경고 문구 목록. 값이 다르면 대신 ResumeMismatch를 올린다.
+    """
+    warnings: list[str] = []
+    if manifest is None:
+        return warnings
+
+    mismatches: list[str] = []
+    for key in RESUME_CRITICAL_KEYS:
+        if key not in manifest:
+            warnings.append(f"{key}가 manifest에 없습니다(옛 형식). 이 항목은 확인하지 못했습니다.")
+            continue
+        recorded = _normalize_manifest_value(manifest.get(key))
+        current = _normalize_manifest_value(expected.get(key))
+        if recorded != current:
+            mismatches.append(f"{key}: 기록값 {manifest.get(key)!r} != 현재값 {expected.get(key)!r}")
+
+    if mismatches:
+        raise ResumeMismatch(
+            f"{source}: 이미 있는 예측 파일이 지금과 다른 설정으로 만들어졌습니다.\n  "
+            + "\n  ".join(mismatches)
+            + "\n다른 --out-name을 쓰거나, 이 파일과 manifest를 지우고 처음부터 다시 추론하십시오."
+        )
+    return warnings
+
+
+def resume_manifest_for(paths: Sequence[Path]) -> tuple[dict[str, Any] | None, Path | None]:
+    """주어진 경로들에서 처음으로 찾은 manifest와 그 경로를 돌려준다.
+
+    TTA를 쓰면 순열별 파일에는 manifest가 없고 합친 결과 파일에만 있으므로, 순열 파일을
+    먼저 보고 없으면 합친 결과 파일의 manifest를 본다.
+    """
+    for path in paths:
+        manifest = pred_mod.read_manifest(path)
+        if manifest is not None:
+            return manifest, Path(path)
+    return None, None
+
+
+# --------------------------------------------------------------------------
 # 모델 래퍼
 # --------------------------------------------------------------------------
 
@@ -142,8 +263,11 @@ class Scorer:
     def encode(self, records: Sequence[VQARecord], perm: Sequence[int]):
         texts = []
         images = []
-        for record in records:
-            shown, _ = collator_mod.apply_permutation(record.options, record.answer_idx, perm)
+        # 순서 의존 보기가 있는 문항은 여기에서 항등 순열로 바뀐다.
+        for record, record_perm in zip(records, resolve_perms(records, perm)):
+            shown, _ = collator_mod.apply_permutation(
+                record.options, record.answer_idx, record_perm
+            )
             image = collator_mod.load_image(record.path, self.data_root)
             texts.append(
                 prompt_mod.generation_text(
@@ -198,12 +322,30 @@ def run_permutation(
     batch_size: int,
     save_every_items: int,
     also_base: bool,
+    expected_manifest: dict[str, Any] | None = None,
+    manifest_paths: Sequence[Path] = (),
 ) -> dict[str, Any]:
     """한 순열에 대해 남은 id만 추론하고 부분 저장한다."""
     done, report = pred_mod.load_partial_predictions(out_file)
     done_ids = set(done["id"].tolist()) if len(done) else set()
     if done_ids:
         print(f"[predict] {out_file.name}: 이미 끝난 {len(done_ids)}건을 건너뜁니다. {report.describe()}")
+        if expected_manifest is not None:
+            # 이어 쓰기 전에 앞선 실행의 조건이 지금과 같은지 확인한다. 조건이 다르면 한
+            # 파일 안에 서로 다른 모델이나 프롬프트의 확률이 섞여 버린다.
+            candidates = list(manifest_paths) or [out_file]
+            manifest, manifest_path = resume_manifest_for(candidates)
+            if manifest is None:
+                print(
+                    f"[predict] 경고: {out_file.name} 에 대응하는 manifest를 찾지 못해 "
+                    "앞선 실행의 설정을 확인하지 못했습니다."
+                )
+            else:
+                warnings = check_resume_manifest(
+                    manifest, expected_manifest, source=str(manifest_path)
+                )
+                for line in warnings:
+                    print(f"[predict] 경고: {manifest_path}: {line}")
 
     todo = [r for r in records if r.id not in done_ids]
     # 길이가 비슷한 것끼리 묶여 padding 낭비를 줄인다. 출력은 id 기준이므로 순서는 자유롭다.
@@ -224,13 +366,15 @@ def run_permutation(
 
     for start in range(0, len(todo), batch_size):
         chunk = todo[start : start + batch_size]
+        # encode가 쓴 순열과 같은 순열로 되돌려야 하므로 여기에서도 한 번 계산한다.
+        chunk_perms = resolve_perms(chunk, perm)
         enc = scorer.encode(chunk, perm)
         shown, base_shown = scorer.score(enc, also_base=also_base)
-        original = collator_mod.invert_probs(shown, perm)
+        original = invert_probs_per_record(shown, chunk_perms)
         for i, record in enumerate(chunk):
             buffer.append(_row(record.id, original[i], run_id))
         if base_shown is not None:
-            base_original = collator_mod.invert_probs(base_shown, perm)
+            base_original = invert_probs_per_record(base_shown, chunk_perms)
             for i, record in enumerate(chunk):
                 base_buffer.append(_row(record.id, base_original[i], run_id + "+base"))
         processed += len(chunk)
@@ -365,6 +509,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     save_every = int(config_mod.get_path(cfg, "infer.save_every_items", 50))
     order_ids = [r.id for r in records]
 
+    # 이어 쓰기 검사와 manifest 기록이 같은 값을 쓰도록 여기에서 한 번만 모은다.
+    expected_manifest = {
+        "model_id": config_mod.get_path(cfg, "model_id"),
+        "model_revision": config_mod.get_path(cfg, "revision"),
+        "adapter": adapter or "none",
+        "precision": config_mod.get_path(cfg, "precision"),
+        "prompt_id": config_mod.get_path(cfg, "prompt_id"),
+        "prompt_hash": scorer.spec.hash(),
+        "min_pixels": config_mod.get_path(cfg, "min_pixels"),
+        "max_pixels": config_mod.get_path(cfg, "max_pixels"),
+    }
+    final_file = output_path(preds_dir, args.out_name, shard=args.shard)
+
     stats = []
     perm_files: list[Path] = []
     base_files: list[Path] = []
@@ -389,12 +546,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             batch_size=batch_size,
             save_every_items=save_every,
             also_base=args.also_base,
+            expected_manifest=expected_manifest,
+            manifest_paths=[out_file, final_file],
         )
         info["perm"] = list(perm)
         stats.append(info)
         print(f"[predict] perm{k} {tuple(perm)}: {info}")
 
-    final_file = output_path(preds_dir, args.out_name, shard=args.shard)
     if args.tta > 1:
         frame = average_perm_files(perm_files, order_ids, args.run_id)
     else:
@@ -402,13 +560,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     manifest = pred_mod.build_manifest(
         run_id=args.run_id,
-        model_id=config_mod.get_path(cfg, "model_id"),
-        model_revision=config_mod.get_path(cfg, "revision"),
-        adapter=adapter or "none",
-        precision=config_mod.get_path(cfg, "precision"),
-        prompt_id=config_mod.get_path(cfg, "prompt_id"),
-        prompt_hash=scorer.spec.hash(),
-        max_pixels=config_mod.get_path(cfg, "max_pixels"),
+        model_id=expected_manifest["model_id"],
+        model_revision=expected_manifest["model_revision"],
+        adapter=expected_manifest["adapter"],
+        precision=expected_manifest["precision"],
+        prompt_id=expected_manifest["prompt_id"],
+        prompt_hash=expected_manifest["prompt_hash"],
+        min_pixels=expected_manifest["min_pixels"],
+        max_pixels=expected_manifest["max_pixels"],
         shard_index=parse_shard(args.shard)[0] if args.shard else None,
         shard_count=parse_shard(args.shard)[1] if args.shard else None,
         seconds_per_item=stats[0].get("seconds_per_item") if stats else None,

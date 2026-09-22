@@ -109,6 +109,8 @@ D1 오전에 수정이 대표로 질문하고, 받은 답을 팀 채널에 그�
 └─ artifacts/
    ├─ data/                             split과 검사 결과
    │  ├─ split_fold0.json               공식 분할입니다. git으로 추적합니다.
+   │  ├─ split_full.json                fold 0까지 합친 전체 학습용 분할입니다 (6,690문항).
+   │  ├─ split_full_v1_6702.json        test 중복 12문항을 빼기 전의 보존본입니다.
    │  ├─ val_fold0_ids.txt              `--val-ids` 와 `--ids-file` 에 넘기는 목록입니다.
    │  ├─ README.md                      split_v1 폐기 안내
    │  ├─ split_v1.json, train_ids.txt, val_ids.txt   폐기한 옛 분할입니다.
@@ -219,11 +221,38 @@ python scripts/folds_to_split.py
 `artifacts/data/split_v1.json` 은 폐기했습니다.
 
 같은 명령이 `artifacts/data/split_full.json` 도 함께 만듭니다. 이 파일은 fold 0의 1,344문항까지
-학습에 넣은 6,702문항짜리 분할이며, 내용 해시는
-`d394c8369c8dff020eea12e5d2d6cc00a7b4eaf97d1cb6f411d2e04a8ac4db01` 입니다. 검증 목록이 비어
+학습에 넣은 6,690문항짜리 분할이며, 내용 해시는
+`ecffa479fd5764376d32af9420c5f0015a8bb76f657c976617e357ce69989af9` 입니다. 검증 목록이 비어
 있으므로 이 분할로 학습한 모델은 fold 0 정확도로 평가할 수 없습니다. fold 0에서 설정을 이미
 검증한 다음에 최종 제출 모델을 만들 때에만 쓰십시오. 21번 노트북에서는 파라미터 셀의
 `TRAIN_SCOPE` 를 `"full"` 로 바꾸면 이 분할을 쓰고, 학습 run-id 뒤에 `_full` 이 붙습니다.
+
+### 전체 분할 파일 두 개의 차이 (2026-09-22 정정)
+
+`artifacts/data` 에는 전체 학습용 분할 파일이 두 개 있습니다. 두 파일의 차이는 다음과 같습니다.
+
+| 파일 | 문항 수 | 내용 해시 | 쓰임 |
+|---|---|---|---|
+| `split_full.json` | 6,690 | `ecffa479...9989af9` | 지금부터 시작하는 전체 학습에 씁니다. |
+| `split_full_v1_6702.json` | 6,702 | `d394c836...8ac4db01` | 2026-09-22에 이미 시작한 학습이 참조하는 보존본입니다. |
+
+옛 파일에 12문항이 더 들어 있는 까닭은 다음과 같습니다.
+`fold_csv_files/exclude_train_overlap_test.csv` 에는 test와 이미지가 완전히 같은 train
+24문항이 적혀 있습니다. `train_fold1234.csv` 는 이 24문항을 처음부터 빼 두었지만
+`val_fold0.csv` 에는 12문항이 그대로 남아 있었고, 옛 `scripts/folds_to_split.py` 는
+`--scope full` 에서 두 fold를 그대로 합치기만 했습니다. 그래서 test와 겹치는 12문항이 전체
+학습 목록에 다시 들어갔습니다. 지금은 합친 다음에 제외 목록을 한 번 더 적용하며, 몇 문항을
+뺐는지를 `excluded_overlap_test` 키와 `excluded_overlap_test_ids` 키에 적어 둡니다.
+`split_fold0.json` 은 이 변경의 영향을 받지 않으므로 fold 0 검증은 그대로 1,344문항입니다.
+
+주의할 점이 하나 있습니다. `vqa.train` 은 `--split` 에 넘긴 **경로 문자열과 id 목록을 함께**
+해시해서 `split_hash` 를 만들고, 재개할 때 이 값이 다르면 학습을 거부합니다. 따라서
+`colab27b_ft_bf16_full_v2_read_text` 처럼 6,702문항으로 이미 시작한 run은, 보존본으로
+`--split artifacts/data/split_full_v1_6702.json` 을 지정하더라도 경로가 달라졌기 때문에
+`split_hash` 가 어긋납니다. 이 run을 이어서 끝내려면 보존본을 지정하고 `--force-resume` 을
+함께 주십시오. 학습에 쓰이는 id 목록은 처음 시작할 때와 완전히 같으므로, 이 경우에 한해서는
+`--force-resume` 을 써도 학습 내용이 달라지지 않습니다. 6,690문항으로 다시 학습하려면
+이어서 하지 말고 새 run-id로 처음부터 시작하십시오.
 
 MD5 그룹만으로 묶었기 때문에 픽셀이 조금 다른 근접 중복은 잡히지 않았습니다. fold 0과 학습
 분할에 걸쳐 있는 쌍이 하나 남아 있으며 `train_0395.jpg` 와 `train_4458.jpg` 입니다. perceptual
