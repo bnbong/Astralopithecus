@@ -421,13 +421,23 @@ def test_stratification_tracks_the_answer_distribution(tiny_root: Path) -> None:
 # --------------------------------------------------------------------------- #
 # fold CSV -> split JSON
 # --------------------------------------------------------------------------- #
-def write_fold_files(root: Path, val_ids: list[str], train_ids: list[str]) -> Path:
+def write_fold_files(
+    root: Path,
+    val_ids: list[str],
+    train_ids: list[str],
+    exclude_ids: list[str] | None = None,
+) -> Path:
     fold_dir = root / "fold_csv_files"
     fold_dir.mkdir(parents=True, exist_ok=True)
     (fold_dir / "val_fold0.csv").write_text("id\n" + "\n".join(val_ids) + "\n", encoding="utf-8")
     (fold_dir / "train_fold1234.csv").write_text(
         "id\n" + "\n".join(train_ids) + "\n", encoding="utf-8"
     )
+    if exclude_ids is not None:
+        (fold_dir / "exclude_train_overlap_test.csv").write_text(
+            "id,fold\n" + "\n".join(f"{row_id},0" for row_id in exclude_ids) + "\n",
+            encoding="utf-8",
+        )
     return fold_dir
 
 
@@ -521,11 +531,50 @@ def test_folds_to_split_writes_full_split_with_empty_validation(tmp_path: Path) 
     assert payload["n_train"] == 5 and payload["n_val"] == 0
     assert payload["includes_fold0_val"] is True
     assert payload["n_fold0_val_added"] == len(val_ids)
+    # 제외 목록 파일이 없으면 아무것도 빼지 않고, 그 사실을 0으로 기록한다.
+    assert payload["excluded_overlap_test"] == 0
+    assert payload["excluded_overlap_test_ids"] == []
     assert payload["content_sha256"] == content_hash(
         {k: v for k, v in payload.items() if k not in {"created", "content_sha256"}}
     )
     # fold0 전용으로 돌렸으면 전체 분할 파일은 생기지 않는다.
     assert not (out_dir / "split_fold0.json").exists()
+
+
+def test_full_split_drops_ids_that_overlap_test(tmp_path: Path) -> None:
+    """fold 0에 남아 있는 test 중복 문항은 전체 분할에서 빠져야 한다.
+
+    `train_fold1234.csv`는 test와 이미지가 같은 문항을 이미 빼 두었지만 `val_fold0.csv`는
+    빼지 않았다. 두 fold를 그냥 합치면 그 문항들이 학습에 다시 들어온다.
+    """
+    import json
+
+    val_ids = ["train_0002.jpg", "train_0004.jpg", "train_0006.jpg"]
+    train_ids = ["train_0001.jpg", "train_0003.jpg", "train_0005.jpg"]
+    # train_0004는 fold 0에만 남아 있는 중복이고, train_0099는 어느 fold에도 없는 id다.
+    fold_dir = write_fold_files(
+        tmp_path, val_ids, train_ids, exclude_ids=["train_0004.jpg", "train_0099.jpg"]
+    )
+    out_dir = tmp_path / "out"
+
+    assert run_folds_to_split(fold_dir, tmp_path, out_dir, scope="full") == 0
+
+    payload = json.loads((out_dir / "split_full.json").read_text(encoding="utf-8"))
+    assert payload["excluded_overlap_test"] == 1
+    assert payload["excluded_overlap_test_ids"] == ["train_0004.jpg"]
+    assert "train_0004.jpg" not in payload["train_ids"]
+    assert payload["n_train"] == 5
+    assert payload["train_ids"] == sorted(set(train_ids + val_ids) - {"train_0004.jpg"})
+    # fold 0에서 실제로 더해진 문항 수도 제외한 뒤의 값을 적는다.
+    assert payload["n_fold0_val_added"] == 2
+    # 제외 목록 파일도 출처로 기록한다.
+    assert "exclude_train_overlap_test.csv" in payload["source_files"]
+
+    # fold0 분할은 제외 목록의 영향을 받지 않는다. 검증 1,344문항을 그대로 두기 위해서다.
+    assert run_folds_to_split(fold_dir, tmp_path, out_dir, scope="fold0") == 0
+    fold0 = json.loads((out_dir / "split_fold0.json").read_text(encoding="utf-8"))
+    assert fold0["val_ids"] == sorted(val_ids)
+    assert "exclude_train_overlap_test.csv" not in fold0["source_files"]
 
 
 def test_train_accepts_a_split_with_no_validation_ids(tmp_path: Path) -> None:
@@ -545,33 +594,72 @@ def test_train_accepts_a_split_with_no_validation_ids(tmp_path: Path) -> None:
 
 
 def test_full_split_output_is_committed_and_current() -> None:
-    """저장소의 split_full.json이 fold0 분할과 정확히 맞물리는지 확인한다."""
+    """저장소의 split_full.json이 fold0 분할과 제외 목록에 정확히 맞물리는지 확인한다."""
     import json
+
+    import pandas as pd
 
     repo = Path(__file__).resolve().parents[1]
     full_path = repo / "artifacts" / "data" / "split_full.json"
     fold0_path = repo / "artifacts" / "data" / "split_fold0.json"
-    if not (full_path.exists() and fold0_path.exists()):
+    exclude_path = repo / "fold_csv_files" / "exclude_train_overlap_test.csv"
+    if not (full_path.exists() and fold0_path.exists() and exclude_path.exists()):
         pytest.skip("artifacts/data의 split 파일이 아직 없습니다.")
 
     full = json.loads(full_path.read_text(encoding="utf-8"))
     fold0 = json.loads(fold0_path.read_text(encoding="utf-8"))
+    exclude_ids = {
+        str(value).strip()
+        for value in pd.read_csv(exclude_path, encoding="utf-8-sig", dtype="string")["id"]
+    }
 
-    assert full["n_train"] == 6702
+    # 5,358 + 1,344 에서 fold 0에 남아 있던 test 중복 12문항을 뺀 값이다.
+    assert full["n_train"] == 6690
     assert full["n_val"] == 0
     assert full["val_ids"] == []
-    assert len(full["train_ids"]) == 6702
-    assert len(set(full["train_ids"])) == 6702
+    assert len(full["train_ids"]) == 6690
+    assert len(set(full["train_ids"])) == 6690
+    assert full["excluded_overlap_test"] == 12
+    assert len(full["excluded_overlap_test_ids"]) == 12
+    assert full["n_fold0_val_added"] == 1332
 
     full_ids = set(full["train_ids"])
     fold0_train = set(fold0["train_ids"])
     fold0_val = set(fold0["val_ids"])
-    # fold0의 학습 목록은 전체의 부분집합이고, 나머지가 정확히 fold 0의 1,344문항이다.
+    # test와 이미지가 같은 문항은 전체 학습 목록에 하나도 남아 있으면 안 된다.
+    assert not (full_ids & exclude_ids)
+    assert set(full["excluded_overlap_test_ids"]) == fold0_val & exclude_ids
+    # fold0의 학습 목록은 전체의 부분집합이고, 나머지는 fold 0에서 제외 문항을 뺀 나머지다.
     assert fold0_train <= full_ids
-    assert full_ids - fold0_train == fold0_val
+    assert full_ids - fold0_train == fold0_val - exclude_ids
     assert len(fold0_val) == 1344
-    # 두 파일이 같은 fold CSV에서 나왔는지 확인한다.
-    assert full["source_files"] == fold0["source_files"]
+    # 두 파일이 같은 fold CSV에서 나왔는지 확인한다. 전체 분할에는 제외 목록이 하나 더 붙는다.
+    assert full["source_files"]["val_fold0.csv"] == fold0["source_files"]["val_fold0.csv"]
+    assert (
+        full["source_files"]["train_fold1234.csv"]
+        == fold0["source_files"]["train_fold1234.csv"]
+    )
+    assert "exclude_train_overlap_test.csv" in full["source_files"]
     assert full["content_sha256"] == content_hash(
         {k: v for k, v in full.items() if k not in {"created", "content_sha256"}}
+    )
+
+
+def test_previous_full_split_is_preserved_for_the_running_colab_run() -> None:
+    """6,702문항으로 이미 시작한 학습이 참조할 수 있도록 옛 분할을 남겨 둔다."""
+    import json
+
+    repo = Path(__file__).resolve().parents[1]
+    legacy_path = repo / "artifacts" / "data" / "split_full_v1_6702.json"
+    if not legacy_path.exists():
+        pytest.skip("artifacts/data/split_full_v1_6702.json이 아직 없습니다.")
+
+    legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+    assert legacy["n_train"] == 6702
+    assert len(legacy["train_ids"]) == 6702
+    assert legacy["val_ids"] == []
+    # 옛 분할은 다시 만들지 않는 보존본이므로 내용 해시가 바뀌면 안 된다.
+    assert (
+        legacy["content_sha256"]
+        == "d394c8369c8dff020eea12e5d2d6cc00a7b4eaf97d1cb6f411d2e04a8ac4db01"
     )

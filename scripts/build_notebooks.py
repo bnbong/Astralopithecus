@@ -2478,14 +2478,14 @@ out of memory가 났습니다. `vqa.jobs start` 는 job을 띄우자마자 곧�
 `CONFIG` 를 비워 두면 아래 셀이 정밀도 정책과 VRAM을 보고 설정 파일을 정합니다. 작은 글자를
 더 읽히고 싶다면 `CONFIG = UPSCALE_CONFIG` 라고 적으십시오. 확대본은 `min_pixels` 를 올려서
 작은 이미지를 키우는 설정이며, run-id 뒤에 `_upscale` 이 붙어서 기존 결과와 섞이지 않습니다.
-상한이 아니라 하한을 올리는 까닭은, 작은 글자 때문에 틀린 fold 0의 13문항이 모두 720×960
+상한이 아니라 하한을 올리는 까닭은, 작은 글자 때문에 틀린 fold 0의 12문항이 모두 720×960
 정도여서 기존 상한에 걸리지도 않았기 때문입니다. 대신 train 전체의 평균 시각 토큰이 702개에서
 1,027개로 약 1.46배가 되므로 VRAM과 학습 시간이 함께 올라갑니다. 8번 절의 preflight로
 `peak_vram_gb` 와 `sec_per_optimizer_step` 을 먼저 확인한 다음에 학습을 시작하십시오.
 
 `TRAIN_SCOPE` 는 학습에 쓰는 문항의 범위를 정합니다. 기본값인 `"fold0"` 은 fold 1~4의
 5,358문항만 학습하고 fold 0의 1,344문항을 검증으로 남겨 둡니다. 설정을 비교하고 학습 효과를
-판단하는 단계에서 쓰는 값입니다. `"full"` 로 바꾸면 fold 0까지 합친 6,702문항을 모두 학습하며,
+판단하는 단계에서 쓰는 값입니다. `"full"` 로 바꾸면 fold 0까지 합친 6,690문항을 모두 학습하며,
 최종 제출 모델을 만들 때에만 씁니다. `"full"` 일 때에는 학습 run-id 뒤에 `_full` 이 붙어서
 기존 run과 섞이지 않고, 15번 절과 16번 절의 fold 0 평가는 안내만 출력하고 건너뜁니다. 전체
 데이터로 학습한 모델은 fold 0 문항도 학습에 썼으므로, 그 정확도가 일반화 성능을 나타내지 않기
@@ -2505,6 +2505,25 @@ out of memory가 났습니다. `vqa.jobs start` 는 job을 띄우자마자 곧�
 정합니다. 기본값은 `False` 입니다. 같은 프롬프트의 원본 예측 파일을 9번 절과 11번 절에서 이미
 만들어 두었다면, 같은 값을 다시 계산하는 셈이라 시간만 더 듭니다. 2026-09-21 실행에서 원본
 test 추론이 43분이었는데 학습 모델의 test 추론이 97분이 걸린 까닭이 이것입니다.
+
+`ADAPTER_RUN_ID` 는 추론에 쓸 adapter를 다른 run에서 빌려 오고 싶을 때에만 적습니다. 비워
+두면 지금까지와 똑같이 이 노트북이 학습한 `FT_RUN` 의 `final_adapter` 를 씁니다. run-id를 적으면
+15번 절과 17번 절의 추론 명령이 `VQA_RUN_ROOT/<ADAPTER_RUN_ID>/final_adapter` 를 `--adapter` 로
+넘기고, 결과는 그대로 지금 `FT_RUN` 폴더 아래에 저장하되 파일 이름 뒤에 `_xadapter` 를
+붙입니다. 예를 들어 fold 0 예측은 `fold0_ft_xadapter.csv`, test 예측은
+`test_ft_xadapter.csv`, 제출 파일은 `artifacts/submission/<FT_RUN>_ft_xadapter.csv` 가 됩니다.
+16번 절의 비교 결과도 같은 접미사를 따라갑니다. 지정한 run에 `final_adapter` 가 없으면 5번
+절에서 곧바로 오류를 내고 멈춥니다.
+
+이 값을 쓰는 상황은 다음과 같습니다. 기본 해상도로 학습해 둔 adapter
+(`colab27b_ft_bf16_v2_read_text`)를 그대로 두고, 추론만 확대 설정(`CONFIG = UPSCALE_CONFIG`)
+으로 다시 돌려서 작은 글자 문항이 실제로 좋아지는지 확인하는 경우입니다. 학습을 다시 하지
+않으므로 A100 시간을 크게 아낄 수 있습니다. 다만 주의할 점이 하나 있습니다. 이렇게 하면
+adapter가 학습된 해상도와 추론에 쓰는 해상도가 서로 달라집니다. LoRA 가중치는 학습할 때 본
+시각 토큰 수에 맞추어 조정된 값이므로, 해상도를 바꾸어 추론하면 순수한 해상도 효과만
+측정되지 않고 학습 조건과 추론 조건이 어긋난 효과까지 섞여 들어옵니다. 따라서 이 결과는
+빠른 예비 확인으로만 쓰시고, 확대 설정이 실제로 도움이 된다는 결론을 내리려면 확대 설정으로
+처음부터 학습한 run과 비교하셔야 합니다.
 """))
 
     cells.append(code(r'''
@@ -2556,17 +2575,24 @@ FT_RUN_ID = "colab27b_ft_bf16"
 
 # --- 데이터 분할 ---
 # TRAIN_SCOPE 가 "fold0" 이면 fold 1~4만 학습하고 fold 0으로 검증합니다. 설정을 비교하는
-# 단계에서 쓰는 값이며 기본값입니다. "full" 로 바꾸면 fold 0까지 합친 6,702문항을 모두
+# 단계에서 쓰는 값이며 기본값입니다. "full" 로 바꾸면 fold 0까지 합친 6,690문항을 모두
 # 학습합니다. 최종 제출 모델을 만들 때에만 쓰십시오.
 TRAIN_SCOPE = "fold0"
 SPLIT_FILE_FOLD0 = "artifacts/data/split_fold0.json"  # 팀 공식 학습 분할 (train_fold1234, 5,358문항)
-SPLIT_FILE_FULL = "artifacts/data/split_full.json"    # fold 0까지 합친 전체 (6,702문항)
+SPLIT_FILE_FULL = "artifacts/data/split_full.json"    # fold 0까지 합친 전체 (6,690문항)
 VAL_IDS_FILE = "fold_csv_files/val_fold0.csv"      # 팀 공식 검증 분할 (fold 0, 1,344문항)
 VAL_OUT_BASE = "fold0_base"
 VAL_OUT_FT = "fold0_ft"
 TEST_OUT_BASE = "test_base"
 TEST_OUT_FT = "test_ft"
 N_TEST_ITEMS = 6714
+
+# --- 선택 단계: 다른 run의 adapter로 추론 ---
+# 비워 두면 이 노트북이 학습한 FT_RUN의 adapter를 그대로 씁니다. run-id를 적으면 그 run의
+# final_adapter를 --adapter 로 넘겨서 추론만 다시 합니다. 결과는 지금 FT_RUN 아래에 저장되며
+# 파일 이름 뒤에 "_xadapter" 가 붙습니다. 기본 해상도로 학습한 adapter를 확대 설정으로
+# 추론할 때 쓰는 값입니다.
+ADAPTER_RUN_ID = ""
 
 # --- 선택 단계: 프롬프트 비교 ---
 RUN_PROMPT_COMPARE = False        # True로 바꾸면 아래 프롬프트로 fold 0을 한 번 더 추론합니다.
@@ -2918,6 +2944,29 @@ CMP_RUN = resolve_run_id(BASE_RUN_ID, COMPARE_PROMPT_ID)
 RES_CMP_UPSCALE = "upscale" in Path(RESOLUTION_COMPARE_CONFIG).stem
 RES_CMP_RUN = resolve_run_id(BASE_RUN_ID, res_suffix="_upscale" if RES_CMP_UPSCALE else "")
 
+# 추론에 쓸 adapter를 정합니다. ADAPTER_RUN_ID 를 적으면 다른 run이 학습한 adapter를 빌려
+# 오고, 결과 파일에는 "_xadapter" 접미사를 붙여서 이 run이 직접 학습한 결과와 구분합니다.
+if ADAPTER_RUN_ID:
+    ADAPTER_SOURCE_RUN = ADAPTER_RUN_ID
+    XADAPTER_SUFFIX = "_xadapter"
+else:
+    ADAPTER_SOURCE_RUN = FT_RUN
+    XADAPTER_SUFFIX = ""
+ADAPTER_PATH = str(RUN_ROOT_P / ADAPTER_SOURCE_RUN / "final_adapter")
+if ADAPTER_RUN_ID and not Path(ADAPTER_PATH).is_dir():
+    raise RuntimeError(
+        "ADAPTER_RUN_ID 로 지정한 run의 final_adapter 를 찾지 못했습니다: %s\n"
+        "run-id의 철자와 Drive 연결 상태를 확인하시고, 그 run의 학습이 끝났는지 먼저 "
+        "확인하십시오. 이 값을 비워 두면 이 노트북이 학습한 %s 의 adapter를 씁니다."
+        % (ADAPTER_PATH, FT_RUN)
+    )
+# 결과 파일 이름에도 접미사를 붙여서 같은 run 폴더 안에서 섞이지 않게 합니다. 이 셀만 다시
+# 실행해도 접미사가 두 번 붙지 않도록 이미 붙어 있는지 확인합니다.
+if XADAPTER_SUFFIX and not VAL_OUT_FT.endswith(XADAPTER_SUFFIX):
+    VAL_OUT_FT = VAL_OUT_FT + XADAPTER_SUFFIX
+if XADAPTER_SUFFIX and not TEST_OUT_FT.endswith(XADAPTER_SUFFIX):
+    TEST_OUT_FT = TEST_OUT_FT + XADAPTER_SUFFIX
+
 if not MIN_FREE_GB:
     if PRECISION == "bf16":
         MIN_FREE_GB = 60
@@ -2937,6 +2986,11 @@ print("프롬프트         : %s" % PROMPT_ID)
 print("학습 범위        : %s (%s)" % (TRAIN_SCOPE, SPLIT_FILE))
 print("base run-id      : %s" % BASE_RUN)
 print("ft run-id        : %s" % FT_RUN)
+if ADAPTER_RUN_ID:
+    print("adapter 출처     : %s (다른 run에서 빌려 옵니다. 결과 이름에 %s 가 붙습니다)"
+          % (ADAPTER_PATH, XADAPTER_SUFFIX))
+else:
+    print("adapter 출처     : %s (이 노트북이 학습하는 run입니다)" % ADAPTER_PATH)
 print("프롬프트 비교 run-id : %s (선택 단계에서만 사용합니다)" % CMP_RUN)
 print("해상도 비교 run-id   : %s (선택 단계에서만 사용합니다)" % RES_CMP_RUN)
 print("학습 허용        : %s" % TRAINING_ALLOWED)
@@ -3166,9 +3220,10 @@ def job_alive(name):
     return bool(status.get("any_alive"))
 
 
-# 학습이 끝난 뒤에 쓰는 adapter의 위치입니다. 학습 전에도 이름만은 정의해 두어야 뒤의 셀들이
-# NameError 없이 안내만 출력하고 넘어갈 수 있습니다.
-ADAPTER = str(RUN_ROOT_P / FT_RUN / "final_adapter")
+# 추론에 쓰는 adapter의 위치입니다. 5번 절에서 ADAPTER_RUN_ID 를 보고 정해 둔 값을 그대로
+# 씁니다. 학습 전에도 이름만은 정의되어 있어야 뒤의 셀들이 NameError 없이 안내만 출력하고
+# 넘어갈 수 있습니다.
+ADAPTER = ADAPTER_PATH
 
 
 def post_train_ready():
@@ -3571,7 +3626,7 @@ else:
         print("-" * 72)
         print("  " + "  ".join("%s %d건" % kv for kv in _counts.items() if kv[1]))
         print()
-        print("개선과 악화의 건수를 함께 보십시오. 13문항은 표본이 작아서 개선 두세 건만으로는")
+        print("개선과 악화의 건수를 함께 보십시오. 12문항은 표본이 작아서 개선 두세 건만으로는")
         print("해상도 상향이 효과가 있다고 단정할 수 없습니다. 전체 1,344문항의 McNemar 결과와")
         print("함께 판단하시고, 두 결과가 어긋나면 그 사실을 그대로 팀 채널에 공유하십시오.")
 '''))
@@ -3625,7 +3680,7 @@ run-id 아래에 bf16 checkpoint와 nf4 checkpoint가 섞이면 이어서 하는
 때문입니다.
 
 학습에 쓰는 분할은 파라미터 셀의 `TRAIN_SCOPE` 가 정합니다. `fold0` 이면 5,358문항을,
-`full` 이면 6,702문항을 학습하므로 전체 step 수도 그만큼 늘어납니다. 5번 절의 출력에서 학습
+`full` 이면 6,690문항을 학습하므로 전체 step 수도 그만큼 늘어납니다. 5번 절의 출력에서 학습
 범위와 분할 파일을 한 번 더 확인하신 다음에 이 셀을 실행하십시오.
 """))
 
@@ -3758,7 +3813,7 @@ elif post_train_ready():
            "--config", CONFIG, "--run-id", FT_RUN,
            "--csv", "train.csv", "--ids-file", VAL_IDS_FILE,
            "--adapter", ADAPTER, "--out-name", VAL_OUT_FT] + ALSO_BASE_ARGS + OVERRIDES
-    gpu_step(FT_RUN + "_val", cmd, done=pred_done(FT_RUN, VAL_OUT_FT))
+    gpu_step(FT_RUN + "_val" + XADAPTER_SUFFIX, cmd, done=pred_done(FT_RUN, VAL_OUT_FT))
 '''))
 
     cells.append(code(r'''
@@ -3769,7 +3824,8 @@ elif not pred_done(FT_RUN, VAL_OUT_FT):
     print("바로 위 셀이 끝난 다음에 이 셀을 다시 실행하십시오.")
 else:
     evaluate(pred_file(FT_RUN, VAL_OUT_FT), FT_RUN + "_" + VAL_OUT_FT,
-             "27B LoRA, 프롬프트 %s, 정밀도 %s" % (PROMPT_ID, PRECISION))
+             "27B LoRA, 프롬프트 %s, 정밀도 %s, adapter %s"
+             % (PROMPT_ID, PRECISION, ADAPTER_SOURCE_RUN))
 '''))
 
     cells.append(md("""
@@ -3804,8 +3860,8 @@ else:
            "--gold", str(DATA_ROOT_P / "train.csv"),
            "--val-ids", VAL_IDS_FILE,
            "--label-a", "base", "--label-b", "ft",
-           "--changed-out", "artifacts/eval/base_vs_ft_changed.csv",
-           "--json-out", "artifacts/eval/base_vs_ft.json",
+           "--changed-out", "artifacts/eval/base_vs_ft%s_changed.csv" % XADAPTER_SUFFIX,
+           "--json-out", "artifacts/eval/base_vs_ft%s.json" % XADAPTER_SUFFIX,
            check=False)
 '''))
 
@@ -3822,7 +3878,7 @@ if post_train_ready():
            "--config", CONFIG, "--run-id", FT_RUN,
            "--csv", "test.csv",
            "--adapter", ADAPTER, "--out-name", TEST_OUT_FT] + ALSO_BASE_ARGS + OVERRIDES
-    gpu_step(FT_RUN + "_test", cmd, done=pred_done(FT_RUN, TEST_OUT_FT))
+    gpu_step(FT_RUN + "_test" + XADAPTER_SUFFIX, cmd, done=pred_done(FT_RUN, TEST_OUT_FT))
 '''))
 
     cells.append(code(r'''
@@ -3831,7 +3887,7 @@ if not pred_done(FT_RUN, TEST_OUT_FT):
     print("바로 위 셀이 끝난 다음에 이 셀을 다시 실행하십시오.")
 else:
     make_submission(pred_file(FT_RUN, TEST_OUT_FT),
-                    "artifacts/submission/%s_ft.csv" % FT_RUN)
+                    "artifacts/submission/%s_ft%s.csv" % (FT_RUN, XADAPTER_SUFFIX))
 '''))
 
     cells.append(md("""
@@ -3844,7 +3900,9 @@ else:
     cells.append(code(r'''
 JOB_NAMES = ["preflight_" + PRECISION,
              BASE_RUN + "_val", BASE_RUN + "_test",
-             FT_RUN + "_train", FT_RUN + "_val", FT_RUN + "_test"]
+             FT_RUN + "_train",
+             FT_RUN + "_val" + XADAPTER_SUFFIX,
+             FT_RUN + "_test" + XADAPTER_SUFFIX]
 if RUN_PROMPT_COMPARE:
     JOB_NAMES.append(CMP_RUN + "_val")
 if RUN_RESOLUTION_COMPARE:

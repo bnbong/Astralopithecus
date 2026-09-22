@@ -8,11 +8,17 @@
 출력은 다음 세 파일이다.
 
     artifacts/data/split_fold0.json   vqa.train --split 이 읽는 형식 (학습 5,358문항)
-    artifacts/data/split_full.json    fold 0까지 합친 전체 학습용 (학습 6,702문항)
+    artifacts/data/split_full.json    fold 0까지 합친 전체 학습용 (학습 6,690문항)
     artifacts/data/val_fold0_ids.txt  한 줄에 id 하나
 
 `split_full.json`은 fold 0에서 설정을 검증한 다음에 쓰는 최종 학습용 분할이다. 검증 목록이
 비어 있으므로 이 분할로 학습한 모델은 fold 0 정확도로 평가할 수 없다.
+
+`fold_csv_files/exclude_train_overlap_test.csv`에는 이미지가 test와 완전히 같은 train
+24문항이 들어 있다. `train_fold1234.csv`는 이 24문항을 이미 빼 두었지만 `val_fold0.csv`
+에는 12문항이 그대로 남아 있으므로, fold 0을 학습에 합칠 때 이 12문항을 다시 빼지 않으면
+test와 겹치는 이미지를 학습하게 된다. 그래서 `--scope full`은 두 fold를 합친 다음에 제외
+목록을 한 번 더 적용하며, 몇 문항을 뺐는지를 `excluded_overlap_test` 키에 기록한다.
 
 세 파일 모두 id만 담고 있어서 저장소에 그대로 추적한다. 같은 입력으로 두 번 실행하면
 `created` 줄 하나만 달라지며, 화면에 찍히는 content 해시는 그 줄을 빼고 계산한다.
@@ -64,6 +70,14 @@ def read_ids(path: Path, *, column: str = "id") -> list[str]:
     return values
 
 
+def read_exclude_ids(path: Path) -> list[str]:
+    """학습에서 빼야 하는 id 목록을 읽는다. 파일이 없으면 경고만 남기고 빈 목록을 돌려준다."""
+    if not path.exists():
+        print(f"주의: 제외 목록 {path} 가 없어서 test 중복 문항을 빼지 못했습니다.")
+        return []
+    return read_ids(path)
+
+
 def answer_counts(train_csv: Path, ids: list[str]) -> dict[str, int]:
     """train.csv를 읽을 수 있으면 선지별 정답 개수를 센다. 없으면 빈 dict."""
     if not train_csv.exists():
@@ -86,6 +100,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--val-csv", default="val_fold0.csv")
     parser.add_argument("--train-csv", default="train_fold1234.csv")
+    parser.add_argument(
+        "--exclude-csv",
+        default="exclude_train_overlap_test.csv",
+        help=(
+            "test와 이미지가 완전히 같아서 학습에서 빼야 하는 train id 목록. "
+            "--scope full에서만 적용한다. 파일이 없으면 경고만 남기고 넘어간다."
+        ),
+    )
     parser.add_argument(
         "--data-root",
         default=str(REPO_ROOT),
@@ -174,24 +196,34 @@ def main() -> int:
         print(f"wrote {val_ids_path}")
 
     if args.scope in ("full", "both"):
-        full_ids = sorted(set(train_ids) | set(val_ids))
+        merged_ids = sorted(set(train_ids) | set(val_ids))
         # fold 0에서 설정을 검증한 다음에만 쓰는 분할이라, 두 목록의 관계를 여기에서 한 번 더
         # 확인한다. 전체 목록이 fold 1~4와 fold 0의 합집합이 아니면 재현이 깨진 것이다.
-        if len(full_ids) != len(train_ids) + len(val_ids):
+        if len(merged_ids) != len(train_ids) + len(val_ids):
             raise SystemExit(
-                f"[오류] 전체 id 수가 맞지 않습니다: {len(full_ids)} != "
+                f"[오류] 전체 id 수가 맞지 않습니다: {len(merged_ids)} != "
                 f"{len(train_ids)} + {len(val_ids)}"
             )
-        holdout = sorted(set(full_ids) - set(train_ids))
+        holdout = sorted(set(merged_ids) - set(train_ids))
         if holdout != sorted(val_ids):
             raise SystemExit(
                 "[오류] 전체 목록에서 fold 1~4를 뺀 나머지가 fold 0과 다릅니다."
             )
 
+        exclude_path = fold_dir / args.exclude_csv
+        exclude_ids = read_exclude_ids(exclude_path)
+        removed_ids = sorted(set(merged_ids) & set(exclude_ids))
+        full_ids = [row_id for row_id in merged_ids if row_id not in set(removed_ids)]
+        fold0_added = len([row_id for row_id in val_ids if row_id not in set(removed_ids)])
+
+        full_source_files = dict(source_files)
+        if exclude_path.exists():
+            full_source_files[exclude_path.name] = file_sha256(exclude_path)
+
         full_payload: dict[str, object] = {
             "version": FULL_SPLIT_VERSION,
             "source": "fold_csv_files (팀 공식 StratifiedGroupKFold 5-fold, fold 0까지 학습에 포함)",
-            "source_files": dict(source_files),
+            "source_files": full_source_files,
             "train_csv_sha256": train_csv_sha256,
             "n_train": len(full_ids),
             "n_val": 0,
@@ -200,10 +232,16 @@ def main() -> int:
             "train_ids": full_ids,
             "val_ids": [],
             "includes_fold0_val": True,
-            "n_fold0_val_added": len(val_ids),
+            "n_fold0_val_added": fold0_added,
+            "excluded_overlap_test": len(removed_ids),
+            "excluded_overlap_test_ids": removed_ids,
         }
         print()
-        print(f"전체 학습    : {len(full_ids)}문항 (fold 1~4 {len(train_ids)} + fold 0 {len(val_ids)})")
+        print(
+            f"전체 학습    : {len(full_ids)}문항 "
+            f"(fold 1~4 {len(train_ids)} + fold 0 {fold0_added}, "
+            f"test 중복 제외 {len(removed_ids)})"
+        )
         print("검증 목록    : 0문항. 이 분할로 학습한 모델은 fold 0 정확도로 평가할 수 없습니다.")
         write_split(out_dir, "split_full.json", full_payload)
 
