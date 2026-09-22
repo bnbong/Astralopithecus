@@ -116,6 +116,44 @@ def test_longest_samples_are_checked_first_for_oom():
     assert result.detail["longest_sample"] == "train_0040.jpg"
 
 
+def test_largest_images_are_added_to_the_oom_group():
+    records = make_records(40)
+    # 글자 수가 짧아서 "가장 긴 표본"에는 절대 들어가지 않는 문항을 큰 이미지로 지정한다.
+    big = [records[0], records[1]]
+    backend, result = run(records, n_steps=2, grad_accum=2, largest_images=big)
+    assert result.detail["largest_image_samples"] == [big[0].id, big[1].id]
+    longest = result.detail["longest_samples"]
+    assert backend.seen[: len(longest)] == longest
+    assert backend.seen[len(longest) : len(longest) + 2] == [big[0].id, big[1].id]
+    assert "가장 큰 이미지 2장 포함" in result.reason
+
+
+def test_largest_images_are_not_run_twice_when_already_longest():
+    records = make_records(40)
+    longest_record = records[-1]  # 글자 수가 가장 긴 문항이다
+    _, result = run(records, n_steps=2, grad_accum=2, largest_images=[longest_record])
+    assert result.detail["largest_image_samples"] == []
+    assert longest_record.id in result.detail["longest_samples"]
+
+
+def test_largest_images_are_off_by_default():
+    _, result = run(make_records(20), n_steps=2, grad_accum=2)
+    assert result.detail["largest_image_samples"] == []
+    assert "가장 큰 이미지" not in result.reason
+
+
+def test_zero_train_steps_skips_the_check_without_running_a_batch():
+    # 학습을 하지 않는 GPU에서는 이 검사만으로 OOM이 나므로 모델을 한 번도 돌리지 않아야 한다.
+    backend, result = run(make_records(20), n_steps=0, grad_accum=8)
+    assert result.status == preflight_mod.SKIP
+    assert backend.seen == []
+
+
+def test_negative_train_steps_also_skips_the_check():
+    _, result = run(make_records(20), n_steps=-1, grad_accum=8)
+    assert result.status == preflight_mod.SKIP
+
+
 def test_timing_summary_states_the_units():
     _, result = run(make_records(), n_steps=3, grad_accum=8)
     text = preflight_mod.timing_summary([result])
@@ -520,6 +558,38 @@ def test_pixel_limits_warns_when_the_processor_cannot_be_called(tmp_path):
     assert result.status == preflight_mod.WARN
     assert "확인하지 못했습니다" in result.reason
     assert "TypeError" in result.detail["probe_errors"]
+
+
+def test_largest_image_records_picks_the_biggest_first(tmp_path):
+    records, data_root = make_pixel_fixture(tmp_path, [(320, 240), (2048, 1536), (800, 600)])
+    picked = preflight_mod.largest_image_records(records, data_root, n=2)
+    assert [r.id for r in picked] == ["train_0002.jpg", "train_0003.jpg"]
+
+
+def test_largest_image_records_returns_nothing_when_disabled(tmp_path):
+    records, data_root = make_pixel_fixture(tmp_path, [(320, 240), (2048, 1536)])
+    assert preflight_mod.largest_image_records(records, data_root, n=0) == []
+
+
+def test_largest_image_records_skips_unlabeled_and_missing_files(tmp_path):
+    records, data_root = make_pixel_fixture(tmp_path, [(320, 240), (2048, 1536)])
+    records[1].answer_idx = None  # 가장 큰 이미지지만 학습 표본이 아니다
+    records.append(
+        VQARecord(id="train_9999.jpg", path="train/train_9999.jpg", question="질문",
+                  options=["가", "나", "다", "라"], answer_idx=0)
+    )
+    picked = preflight_mod.largest_image_records(records, data_root, n=3)
+    assert [r.id for r in picked] == ["train_0001.jpg"]
+
+
+def test_largest_image_cli_flag_defaults_to_off():
+    parser = preflight_mod.build_parser()
+    args = parser.parse_args(["--config", "configs/lab_qwen35_9b.yaml"])
+    assert args.largest_image_samples == 0
+    args = parser.parse_args(
+        ["--config", "configs/lab_qwen35_9b.yaml", "--largest-image-samples", "2"]
+    )
+    assert args.largest_image_samples == 2
 
 
 def test_pixel_limits_cli_sample_flag():

@@ -188,6 +188,43 @@ PIXEL_LIMIT_TOLERANCE = 0.02
 DEFAULT_PIXEL_SAMPLE = 200
 
 
+def largest_image_records(
+    records: Sequence[collator_mod.VQARecord],
+    data_root: Path,
+    *,
+    n: int = 2,
+    sample: int = DEFAULT_PIXEL_SAMPLE,
+) -> list[collator_mod.VQARecord]:
+    """표본에서 원본 픽셀 수가 가장 큰 문항을 n개 고른다.
+
+    forward_backward가 OOM을 보려고 고르는 "가장 긴 표본"은 `approx_length()`, 즉 질문과
+    선택지의 글자 수만 본다. 해상도를 올린 설정에서는 메모리를 지배하는 쪽이 글자가 아니라
+    시각 토큰이므로, 가장 큰 이미지가 표본에 한 장도 들어가지 않으면 preflight가 OOM을
+    놓치고 본 학습에서 몇 시간 뒤에 죽는다. 그래서 이미지 크기 기준으로도 따로 고른다.
+    이미지를 디코딩하지 않고 헤더의 크기만 읽으므로 비용은 거의 들지 않는다.
+    """
+    if int(n) <= 0:
+        return []
+    from PIL import Image
+
+    sized: list[tuple[int, collator_mod.VQARecord]] = []
+    for record in records[: max(int(sample), 1)]:
+        if record.answer_idx is None:
+            continue
+        path = collator_mod.resolve_image_path(record.path, data_root)
+        if not path.exists():
+            continue
+        try:
+            with Image.open(path) as handle:
+                width, height = handle.size
+        except Exception:
+            continue
+        sized.append((width * height, record))
+    # key로만 정렬하므로 넓이가 같아도 record끼리 비교하지 않는다.
+    sized.sort(key=lambda item: -item[0])
+    return [record for _, record in sized[: int(n)]]
+
+
 def _visual_tokens_from_grid(grid: Any, merge_size: int) -> int | None:
     """image_grid_thw 한 행에서 merge 뒤의 시각 토큰 수를 계산한다.
 
@@ -611,6 +648,7 @@ def check_forward_backward(
     grad_accum: int = 1,
     max_timing_microbatches: int = DEFAULT_MAX_TIMING_MICROBATCHES,
     n_longest: int = 4,
+    largest_images: Sequence[collator_mod.VQARecord] = (),
     seed: int = 0,
     tf32_ab: bool = False,
     tf32_enabled: bool = True,
@@ -621,6 +659,14 @@ def check_forward_backward(
     grad_accum개의 microbatch이므로 예산 계산에는 `sec_per_optimizer_step`을 써야
     한다. 가장 긴 표본만으로 잰 시간은 상한이라 평균 대신 쓰면 안 된다.
 
+    `largest_images`를 주면 그 문항들을 OOM 표본 뒤에 덧붙여서 한 번씩 더 돌린다. 글자
+    수는 짧아도 이미지가 커서 시각 토큰이 많은 문항을 반드시 통과시키기 위한 것이며,
+    고를 때에는 `largest_image_records`를 쓴다.
+
+    `n_steps`가 0 이하이면 이 검사 자체를 건너뛰고 SKIP을 돌려준다. 학습을 하지 않는
+    가상 머신에서는 역전파 활성값 때문에 이 검사 하나가 out of memory를 일으키는데,
+    그 GPU에서도 추론 점검은 그대로 수행해야 하기 때문이다.
+
     시간은 CPU 준비 구간(make_micro_batch: 이미지 디코딩, processor, 템플릿)과 GPU
     구간(forward+backward)으로 나누어 잰다. 둘 중 어느 쪽이 병목인지 모르면 속도
     차이를 GPU 설정 탓으로만 돌리기 쉽다. `sec_per_microbatch_mean`은 예전과 같이
@@ -630,6 +676,11 @@ def check_forward_backward(
 
     import torch
 
+    if int(n_steps) <= 0:
+        return CheckResult(
+            "forward_backward", SKIP, "학습 점검을 건너뛰었습니다 (--n-train-steps 0)."
+        )
+
     labeled = [r for r in records if r.answer_idx is not None]
     if not labeled:
         return CheckResult("forward_backward", SKIP, "학습 표본이 없습니다.")
@@ -637,6 +688,15 @@ def check_forward_backward(
     grad_accum = max(int(grad_accum), 1)
     ordered = sorted(labeled, key=lambda r: -r.approx_length())
     longest = ordered[: max(min(int(n_longest), len(ordered)), 1)]
+
+    # OOM 표본 = 글자가 가장 긴 문항 + 이미지가 가장 큰 문항. 뒤쪽은 호출자가 골라서 준다.
+    oom_group = list(longest)
+    oom_ids = {record.id for record in oom_group}
+    for record in largest_images:
+        if record.id in oom_ids:
+            continue
+        oom_group.append(record)
+        oom_ids.add(record.id)
 
     n_timing = min(max(int(n_steps), 1) * grad_accum, max(int(max_timing_microbatches), 1))
     n_timing = min(n_timing, len(labeled))
@@ -661,11 +721,11 @@ def check_forward_backward(
 
     runtime.reset_peak_vram()
 
-    # (a) 가장 긴 표본으로 OOM을 본다. 첫 회는 warm-up이라 cold로 따로 기록한다.
+    # (a) 가장 긴 표본과 가장 큰 이미지로 OOM을 본다. 첫 회는 warm-up이라 cold로 따로 기록한다.
     longest_timings: list[float] = []
     losses: list[float] = []
     try:
-        for record in longest:
+        for record in oom_group:
             prepare, compute, loss_value = run_one(record)
             longest_timings.append(prepare + compute)
             losses.append(loss_value)
@@ -708,6 +768,7 @@ def check_forward_backward(
         "warm_seconds_mean": sec_per_microbatch_mean,
         "longest_samples": [r.id for r in longest],
         "longest_sample": longest[0].id,
+        "largest_image_samples": [r.id for r in oom_group[len(longest):]],
         "longest_approx_length": longest[0].approx_length(),
         "loss_mean": _mean(losses),
         "peak_vram_gb": runtime.peak_vram_gb(),
@@ -721,6 +782,8 @@ def check_forward_backward(
         f"grad_accum={grad_accum} -> {sec_per_optimizer_step:.2f}s/optimizer step, "
         f"peak VRAM {detail['peak_vram_gb']} GB"
     )
+    if detail["largest_image_samples"]:
+        reason += f", 가장 큰 이미지 {len(detail['largest_image_samples'])}장 포함"
 
     if tf32_ab:
         try:
@@ -1020,7 +1083,12 @@ def timing_summary(results: Sequence[CheckResult]) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m vqa.preflight", description="학습 전 환경 점검")
     config_mod.add_config_arguments(parser)
-    parser.add_argument("--n-train-steps", type=int, default=20)
+    parser.add_argument(
+        "--n-train-steps",
+        type=int,
+        default=20,
+        help="학습 점검에 쓸 optimizer step 수. 0을 주면 forward_backward 검사를 건너뛴다",
+    )
     parser.add_argument("--n-infer", type=int, default=50)
     parser.add_argument(
         "--max-timing-microbatches",
@@ -1034,6 +1102,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_PIXEL_SAMPLE,
         help="pixel_limits 검사에서 크기를 훑어 볼 이미지 개수 (기본: %d)" % DEFAULT_PIXEL_SAMPLE,
+    )
+    parser.add_argument(
+        "--largest-image-samples",
+        type=int,
+        default=0,
+        help=(
+            "forward_backward의 OOM 표본에 원본 픽셀 수가 가장 큰 이미지를 이만큼 강제로 "
+            "넣는다 (기본: 0, 넣지 않음). 무작위 표본과 글자 길이 기준 표본만으로는 큰 "
+            "이미지가 빠질 수 있어서, 해상도를 올린 설정에서 OOM을 놓치지 않으려면 켜야 한다."
+        ),
     )
     parser.add_argument("--skip-model", action="store_true", help="모델 로딩 없이 토큰/템플릿만 점검")
     parser.add_argument(
@@ -1171,6 +1249,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "lora_targets",
                     lambda: check_lora_targets(backend.model, cfg, getattr(backend, "targets", None))[0],
                 )
+                # 이미지가 가장 큰 문항은 전체 표본을 훑어서 고른다. 헤더만 읽으므로 빠르다.
+                big_images = largest_image_records(
+                    records, data_root, n=args.largest_image_samples, sample=len(records)
+                )
+                if big_images:
+                    print(
+                        "forward_backward의 OOM 표본에 가장 큰 이미지 %d장을 넣습니다: %s"
+                        % (len(big_images), ", ".join(r.id for r in big_images)),
+                        flush=True,
+                    )
                 flight.run(
                     "forward_backward",
                     lambda: check_forward_backward(
@@ -1178,6 +1266,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         records,
                         args.n_train_steps,
                         grad_accum=int(config_mod.get_path(cfg, "train.grad_accum", 1) or 1),
+                        largest_images=big_images,
                         max_timing_microbatches=args.max_timing_microbatches,
                         seed=int(config_mod.get_path(cfg, "train.seed", 42) or 0),
                         tf32_ab=bool(args.tf32_ab),

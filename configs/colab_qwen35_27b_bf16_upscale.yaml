@@ -1,0 +1,56 @@
+# Colab Pro+ A100 80GB / transformers 5.x / Qwen3.5-27B bf16 LoRA / 작은 이미지 확대본.
+# colab_qwen35_27b_bf16.yaml 을 그대로 복사하고 min_pixels 와 max_pixels 를 함께 올렸다.
+#
+# 왜 max_pixels 가 아니라 min_pixels 인가.
+# fold 0에서 남은 모델 오류 20건 중 13건이 작은 글자와 숫자를 잘못 읽어서 생긴 오류인데,
+# 그 13건의 원본 크기를 직접 재 보니 12건이 720x960 또는 960x720(691,200 픽셀), 1건이
+# 720x1280(921,600 픽셀), 1건이 720x720(518,400 픽셀)이었다. 13건이 모두 기존 상한인
+# 1,048,576 픽셀 아래에 있으므로, max_pixels 를 올려도 이 문항들의 입력은 전혀 바뀌지
+# 않는다. 상한에 걸리는 이미지는 train 6,714장 가운데 2.8%뿐이다. 그래서 상한 대신
+# 하한을 올려서 작은 이미지를 확대한다. min_pixels 를 1,048,576으로 올리면 691,200 픽셀
+# 이미지가 시각 토큰 675개에서 1,024개로 늘어난다.
+#
+# 비용: train 전체의 평균 시각 토큰이 702개에서 1,027개로 약 1.46배가 된다. 학습 시간과
+# VRAM도 그만큼 올라간다고 보아야 한다. max_pixels 를 2,097,152로 함께 올린 까닭은 확대한
+# 이미지가 상한에 걸려 다시 잘리지 않게 하기 위해서다.
+#
+# 근거가 되는 선행 실험: 수정 님이 3B에서 같은 방식으로 확대해 보았을 때 정확도가
+# 0.67%p 올랐고 p값은 0.32였다. 즉 방향은 맞지만 이 표본에서는 통계적으로 확인되지 않았다.
+#
+# 주의: VRAM과 속도는 이 파일을 쓰기 전에 preflight로 반드시 확인한다. 기존 bf16 학습은
+# peak 57GB, step당 13.5초였다. 40GB 가상 머신에서는 이 설정으로 학습하지 않는다.
+model_id: Qwen/Qwen3.5-27B
+revision: fc05daec18b0a78c049392ed2e771dde82bdf654   # 2026-09-21 Colab A100에서 받은 스냅샷 커밋
+model_path: null          # 오프라인이면 로컬 스냅샷 디렉터리를 여기에 적는다
+precision: bf16
+attn_implementation: sdpa
+
+min_pixels: 1048576        # 1024 * 32 * 32
+max_pixels: 2097152        # 2048 * 32 * 32
+
+prompt_id: v1_image_only
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  targets: auto
+
+train:
+  lr: 1.0e-4
+  epochs: 1
+  micro_batch: 1
+  grad_accum: 8
+  warmup_ratio: 0.03
+  scheduler: linear
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  seed: 42
+  shuffle_options: true
+  save_every_steps: 50
+  save_every_minutes: 15
+  keep_last: 2
+
+infer:
+  batch_size: 1
+  save_every_items: 50

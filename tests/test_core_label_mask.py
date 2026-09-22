@@ -262,7 +262,15 @@ def test_teammate_template_constant_matches_infer_val_source():
     """infer_val.py를 직접 읽어서 위 상수가 원본과 같은지 확인한다."""
     import ast
 
-    source = (Path(__file__).resolve().parents[1] / "infer_val.py").read_text(encoding="utf-8")
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates = [repo_root / "infer_val.py", repo_root / "scripts" / "infer_val.py"]
+    infer_val_path = next((p for p in candidates if p.exists()), None)
+    assert infer_val_path is not None, (
+        "infer_val.py를 찾지 못했습니다 (확인한 경로: "
+        + ", ".join(str(p) for p in candidates)
+        + "). 템플릿 일치 검증을 건너뛸 수 없습니다."
+    )
+    source = infer_val_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
     prompts = None
     for node in ast.walk(tree):

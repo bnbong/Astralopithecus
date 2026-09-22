@@ -2120,6 +2120,9 @@ else:
 
 Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
 os.environ["HF_HOME"] = CACHE_DIR
+# HF_HOME만 지정하면 실제 스냅샷은 HF_HOME/hub 아래에 놓입니다. 아래의 hf download는
+# --cache-dir 을 CACHE_DIR 로 지정하므로, 둘을 맞추지 않으면 같은 가중치를 두 번 받게 됩니다.
+os.environ["HF_HUB_CACHE"] = CACHE_DIR
 os.environ["VQA_MODEL_ROOT"] = CACHE_DIR
 print("캐시 위치:", CACHE_DIR)
 print(CACHE_NOTE)
@@ -2412,11 +2415,11 @@ def nb_21():
 
 1. 파라미터를 정하고 Drive를 연결한 다음 코드를 받습니다.
 2. 환경을 설치하고 확인합니다. 가속 커널을 쓸 수 있는지도 여기에서 봅니다.
-3. 현재 GPU의 VRAM을 재서 정밀도와 run-id를 확정합니다.
+3. 현재 GPU의 VRAM을 재서 정밀도와 run-id를 확정하고, 가중치를 캐시에 확보합니다.
 4. 데이터를 로컬 디스크에 풉니다.
 5. preflight로 학습 전 점검을 수행합니다.
 6. 학습하지 않은 원본 27B로 fold 0을 추론하고 평가합니다.
-7. (선택) 다른 프롬프트로 같은 fold 0을 추론해서 비교합니다.
+7. (선택) 다른 프롬프트로, 또는 해상도를 올린 설정으로 같은 fold 0을 추론해서 비교합니다.
 8. 원본 27B로 전체 test를 추론하고 제출 파일을 만듭니다.
 9. 학습을 시작합니다. 학습은 열 시간 안팎이 걸리므로 기다리지 않고 넘어갑니다.
 10. 학습이 끝난 뒤에 fold 0을 다시 추론하고, 원본과 문항 단위로 비교합니다. 전체 데이터로
@@ -2472,6 +2475,14 @@ out of memory가 났습니다. `vqa.jobs start` 는 job을 띄우자마자 곧�
 섞이는 일을 막기 위해서입니다. 학습과 추론에 쓰는 모든 명령이 같은 `PROMPT_ID` 를
 `--set prompt_id=...` 로 받으므로, 학습할 때와 추론할 때의 프롬프트는 항상 같습니다.
 
+`CONFIG` 를 비워 두면 아래 셀이 정밀도 정책과 VRAM을 보고 설정 파일을 정합니다. 작은 글자를
+더 읽히고 싶다면 `CONFIG = UPSCALE_CONFIG` 라고 적으십시오. 확대본은 `min_pixels` 를 올려서
+작은 이미지를 키우는 설정이며, run-id 뒤에 `_upscale` 이 붙어서 기존 결과와 섞이지 않습니다.
+상한이 아니라 하한을 올리는 까닭은, 작은 글자 때문에 틀린 fold 0의 13문항이 모두 720×960
+정도여서 기존 상한에 걸리지도 않았기 때문입니다. 대신 train 전체의 평균 시각 토큰이 702개에서
+1,027개로 약 1.46배가 되므로 VRAM과 학습 시간이 함께 올라갑니다. 8번 절의 preflight로
+`peak_vram_gb` 와 `sec_per_optimizer_step` 을 먼저 확인한 다음에 학습을 시작하십시오.
+
 `TRAIN_SCOPE` 는 학습에 쓰는 문항의 범위를 정합니다. 기본값인 `"fold0"` 은 fold 1~4의
 5,358문항만 학습하고 fold 0의 1,344문항을 검증으로 남겨 둡니다. 설정을 비교하고 학습 효과를
 판단하는 단계에서 쓰는 값입니다. `"full"` 로 바꾸면 fold 0까지 합친 6,702문항을 모두 학습하며,
@@ -2479,6 +2490,16 @@ out of memory가 났습니다. `vqa.jobs start` 는 job을 띄우자마자 곧�
 기존 run과 섞이지 않고, 15번 절과 16번 절의 fold 0 평가는 안내만 출력하고 건너뜁니다. 전체
 데이터로 학습한 모델은 fold 0 문항도 학습에 썼으므로, 그 정확도가 일반화 성능을 나타내지 않기
 때문입니다. 17번 절의 test 추론과 제출 파일 생성은 두 경우 모두 그대로 동작합니다.
+
+`MODEL_CACHE` 는 27B 가중치를 어디에 둘지 정합니다. 기본값인 `"auto"` 는 20번 노트북이 남긴
+캐시를 먼저 찾고, 없으면 Drive 여유가 `MODEL_CACHE_NEED_GB` 이상일 때에만 Drive를 씁니다.
+개인 계정처럼 Drive 용량이 부족한 상황이라면 `"local"` 로 적어서 가상 머신의 로컬 디스크에
+받으십시오. 내려받는 파일은 원본 bf16 스냅샷이며 약 54GB입니다. `nf4` 로 돌리더라도 양자화는
+가중치를 GPU에 올리는 시점에 수행하므로 캐시에 필요한 용량은 줄지 않습니다. 자세한 절차는
+`docs/colab_personal_account.md` 에 정리해 두었습니다.
+
+`RUN_RESOLUTION_COMPARE` 를 `True` 로 바꾸면 10-1절이 `RESOLUTION_COMPARE_CONFIG` 로 fold 0을
+한 번 더 추론해서 해상도만 다른 짝을 만듭니다. 프롬프트와 정밀도는 9번 절과 같게 둡니다.
 
 `ALSO_BASE` 는 학습 모델로 추론할 때 원본 모델의 확률까지 같은 forward에서 계산할지를
 정합니다. 기본값은 `False` 입니다. 같은 프롬프트의 원본 예측 파일을 9번 절과 11번 절에서 이미
@@ -2501,13 +2522,30 @@ ARCHIVE_PASSWORD = ""                             # 비워 두면 실행할 때 
 LOCAL_SCRATCH = "/content/scratch"
 DATA_ROOT = "/content/data"
 RUN_ROOT = "/content/drive/MyDrive/vqa/runs"
-MODEL_ROOT = "/content/drive/MyDrive/vqa/hf_cache"   # 20번이 남긴 model_snapshot.json이 있으면 그것을 씁니다.
+MODEL_ROOT = "/content/drive/MyDrive/vqa/hf_cache"   # MODEL_CACHE 가 "drive" 이거나 "auto" 일 때 쓰는 Drive 캐시입니다.
+LOCAL_MODEL_ROOT = "/content/hf_cache"               # 가상 머신 로컬 디스크의 캐시입니다.
+
+# 가중치 캐시를 어디에 둘지 정합니다.
+#   "auto"  : 20번 노트북이 남긴 캐시가 있으면 그것을 쓰고, 없으면 Drive 여유를 보고 고릅니다.
+#   "drive" : 언제나 MODEL_ROOT 를 씁니다. 가상 머신이 바뀌어도 다시 받지 않습니다.
+#   "local" : 언제나 LOCAL_MODEL_ROOT 를 씁니다. Drive 용량이 부족한 개인 계정에서 쓰십시오.
+#             런타임이 회수되면 가중치가 사라지므로 접속할 때마다 다시 받아야 합니다.
+MODEL_CACHE = "auto"
+MODEL_CACHE_NEED_GB = 60.0        # 27B 원본 스냅샷은 약 54GB입니다. 여유를 포함한 값입니다.
 
 # --- 모델과 프롬프트 ---
+MODEL_ID = "Qwen/Qwen3.5-27B"
+# 2026-09-21 Colab A100에서 받은 스냅샷 커밋입니다. configs/colab_qwen35_27b_*.yaml 의
+# revision 과 같은 값이어야 합니다.
+MODEL_REVISION = "fc05daec18b0a78c049392ed2e771dde82bdf654"
+# 캐시에 스냅샷이 없으면 5-1절에서 먼저 내려받습니다. 추론 job이 가중치를 받는 도중에
+# 재시작되는 상황을 피하기 위해서입니다.
+DOWNLOAD_WEIGHTS = True
 # 정밀도 정책입니다. 팀 결정은 bf16입니다. "auto"는 VRAM만 보고 고르고, "nf4"는 항상 nf4를 씁니다.
 PRECISION_POLICY = "bf16"
 BF16_CONFIG = "configs/colab_qwen35_27b_bf16.yaml"
 NF4_CONFIG = "configs/colab_qwen35_27b_nf4.yaml"
+UPSCALE_CONFIG = "configs/colab_qwen35_27b_bf16_upscale.yaml"   # 작은 이미지 확대본 (min_pixels 상향)
 CONFIG = ""                       # 비워 두면 아래 셀이 정책과 VRAM을 보고 정합니다. 직접 적으면 그 값을 씁니다.
 PROMPT_ID = "v1_image_only"       # 학습과 추론이 모두 이 프롬프트를 씁니다.
 
@@ -2534,9 +2572,23 @@ N_TEST_ITEMS = 6714
 RUN_PROMPT_COMPARE = False        # True로 바꾸면 아래 프롬프트로 fold 0을 한 번 더 추론합니다.
 COMPARE_PROMPT_ID = "v2_read_text"
 
+# --- 선택 단계: 해상도 비교 ---
+# True로 바꾸면 10-1절이 같은 프롬프트, 같은 정밀도로 fold 0을 한 번 더 추론합니다. 이때에만
+# 아래의 확대본 설정을 쓰므로, 9번 절의 결과와 비교하면 해상도 하나만 달라진 짝을 얻습니다.
+RUN_RESOLUTION_COMPARE = False
+RESOLUTION_COMPARE_CONFIG = UPSCALE_CONFIG
+# 작은 글자 때문에 틀렸다고 판정한 문항 목록입니다. 10-1절이 이 문항들의 정오 변화를 따로
+# 표로 출력합니다. 파일이 없으면 그 표만 건너뜁니다.
+ERROR_TYPES_CSV = "artifacts/data/fold0_error_types_27b.csv"
+SMALL_TEXT_CONSENSUS = "모델 오류: 작은 글자"
+
 # --- preflight ---
 PREFLIGHT_TRAIN_STEPS = 8
 PREFLIGHT_INFER_ITEMS = 20
+# preflight의 OOM 표본에 원본 픽셀 수가 가장 큰 이미지를 몇 장 강제로 넣을지 정합니다.
+# 이 값이 0이면 OOM 표본을 글자 길이와 무작위로만 고르므로, 해상도를 올린 설정에서 가장 큰
+# 이미지가 표본에 빠지면 preflight가 OOM을 놓칩니다.
+PREFLIGHT_LARGEST_IMAGES = 2
 
 # --- job 실행 ---
 AUTO_RESTART = 3                  # 비정상 종료 시 다시 띄울 횟수입니다. 1 이상이어야 합니다.
@@ -2607,43 +2659,108 @@ fallback이었습니다. 설치에 실패하더라도 학습 자체는 가능하
 
 정밀도는 20번 노트북이 남긴 `colab_choice.json` 이 아니라 지금 이 가상 머신의 VRAM을 직접
 재서 정합니다. 20번이 40GB에서 고른 nf4가 80GB 가상 머신까지 따라와서 조용히 nf4로 돌아간
-사고가 있었기 때문입니다. `colab_choice.json` 은 참고 정보로만 출력하며, 파라미터 셀에서
-`CONFIG` 를 직접 적었다면 그 값이 무엇보다 우선합니다.
+사고가 있었기 때문입니다. `colab_choice.json` 은 참고 정보로만 출력합니다.
 
-run-id는 프롬프트와 정밀도가 다른 결과가 한 폴더에 섞이지 않도록 다음 규칙으로 만듭니다.
+### 설정 파일과 정밀도를 따로 정하는 까닭
+
+파라미터 셀에서 `CONFIG` 를 직접 적었다면 그 파일이 언제나 우선합니다. 다만 VRAM이 모자라서
+정밀도를 낮춰야 하는 상황에서 설정 파일 자체를 nf4 설정으로 바꿔 버리면, 그 파일에 적어 둔
+해상도까지 함께 바뀌어 버립니다. 확대본을 고른 실행에서 바로 이 일이 일어나면 `min_pixels`
+상향이 조용히 사라지고, 실제로는 기본 해상도로 돌면서 결과만 확대본이라고 기록됩니다. 그래서
+이 셀은 설정 파일을 바꾸지 않고 `--set precision=nf4` 를 입력 설정에 덧붙이는 방식으로 정밀도만
+내립니다. `CONFIG` 를 비워 두었을 때에는 예전처럼 nf4 설정 파일을 그대로 고릅니다.
+
+### VRAM에 따른 동작
+
+| 감지된 VRAM | 학습 | 추론 |
+|---|---|---|
+| 70GB 이상 | bf16으로 허용합니다. | bf16으로 수행합니다. |
+| 35GB 이상 70GB 미만 | 기본 해상도 nf4 설정에서만 허용합니다. | nf4로 수행합니다. |
+| 20GB 이상 35GB 미만 | 막습니다. | nf4로 수행합니다. |
+| 20GB 미만 | 오류를 내고 멈춥니다. | 수행하지 않습니다. |
+
+24GB짜리 L4에서도 27B 추론은 들어갑니다. nf4로 양자화한 가중치가 약 15GB이고, 여기에 시각
+토큰 2,048개 분량의 활성값과 KV 캐시를 더해도 20GB를 넘지 않기 때문입니다. bf16 참고 실행이
+가중치 54GB에 peak 57GB였다는 기록도 활성값이 3GB 남짓이었다는 뜻이므로 같은 결론을 가리킵니다.
+다만 학습은 옵티마이저 상태와 역전파 활성값이 더 붙으므로 24GB에서는 허용하지 않습니다.
+
+run-id는 프롬프트와 해상도와 정밀도가 다른 결과가 한 폴더에 섞이지 않도록 다음 규칙으로
+만듭니다.
 
 - `TRAIN_SCOPE` 가 `full` 이면 학습 run-id의 기본 이름 뒤에 먼저 `_full` 을 붙입니다.
 - `PROMPT_ID` 가 `v1_image_only` 이면 프롬프트 접미사를 붙이지 않고 기본 이름을 그대로 씁니다.
 - 그 밖의 프롬프트이면 `_<PROMPT_ID>` 를 붙입니다.
-- 정책이 bf16인데 VRAM이 모자라서 nf4로 내려가면 `_nf4` 를 덧붙이고 학습을 막습니다.
+- `CONFIG` 에 확대본(`configs/colab_qwen35_27b_bf16_upscale.yaml`)을 적었으면 `_upscale` 을
+  덧붙입니다. 해상도가 다른 예측이 같은 run 폴더에 섞이지 않게 하려는 것입니다.
+- 정책이 bf16인데 VRAM이 모자라서 nf4로 내려가면 맨 뒤에 `_nf4` 를 덧붙이고 학습을 막습니다.
 
 예를 들어 `TRAIN_SCOPE` 가 `full` 이고 프롬프트가 기본값이며 bf16으로 돌아가면 학습 run-id는
-`colab27b_ft_bf16_full` 이 됩니다. 원본 모델의 run-id는 학습과 무관하므로 `_full` 이 붙지
-않습니다. 이 셀은 `TRAIN_SCOPE` 에 맞는 분할 파일이 실제로 있는지도 함께 확인합니다. 파일이
-없으면 `python scripts/folds_to_split.py` 를 먼저 실행하십시오.
+`colab27b_ft_bf16_full` 이 됩니다. 같은 조건에서 확대본을 쓰고 프롬프트를 `v2_read_text`
+로 바꾸면 `colab27b_ft_bf16_full_v2_read_text_upscale` 이 됩니다. 40GB나 24GB를 받아서 nf4로
+내려간 원본 추론은 기본 설정에서 `colab27b_base_bf16_nf4` 가 되고, 확대본에서는
+`colab27b_base_bf16_upscale_nf4` 가 됩니다. 원본 모델의 run-id는 학습과 무관하므로 `_full` 이
+붙지 않습니다.
+
+확대본은 평균 시각 토큰이 1.46배가 되므로 VRAM이 70GB에 못 미치는 가상 머신에서는 정밀도를
+낮춰도 학습에는 위험합니다. 그래서 이 셀은 VRAM이 70GB 미만인데 확대본이나 bf16 설정이
+선택되면 학습을 막고 경고를 출력합니다. 추론은 그대로 진행할 수 있습니다. 이 셀은
+`TRAIN_SCOPE` 에 맞는 분할 파일이 실제로 있는지도 함께 확인합니다. 파일이 없으면
+`python scripts/folds_to_split.py` 를 먼저 실행하십시오.
 """))
 
     cells.append(code(r'''
-# --- 가중치 캐시 위치를 정합니다 ---
-_snap_path = RUN_ROOT_P / "model_snapshot.json"
-if _snap_path.exists():
-    _snap = json.loads(_snap_path.read_text(encoding="utf-8"))
-    _cache_dir = _snap.get("cache_dir") or ""
-    if _cache_dir and Path(_cache_dir).is_dir():
-        MODEL_ROOT = _cache_dir
-        print("20번 노트북이 쓴 가중치 캐시를 그대로 사용합니다:", MODEL_ROOT)
-    else:
-        MODEL_ROOT = "/content/hf_cache"
-        print("20번 노트북이 기록한 캐시 %s 가 이 런타임에는 없습니다." % (_cache_dir or "(미기록)"))
-        print("로컬 캐시 %s 를 대신 사용합니다. 가중치를 다시 내려받으므로 수십 분이 걸릴 수 있습니다."
-              % MODEL_ROOT)
-else:
-    print("model_snapshot.json이 없습니다. 파라미터 셀의 MODEL_ROOT를 그대로 사용합니다.")
+import shutil
 
+# --- 가중치 캐시 위치를 정합니다 ---
+def _free_gb(path):
+    """해당 경로가 속한 파일 시스템의 여유 공간을 GB 단위로 돌려줍니다."""
+    try:
+        target = Path(path)
+        target.mkdir(parents=True, exist_ok=True)
+        return round(shutil.disk_usage(str(target)).free / 1024 ** 3, 1)
+    except Exception as exc:
+        print("%s 의 여유 공간을 확인하지 못했습니다: %s" % (path, exc))
+        return 0.0
+
+
+if MODEL_CACHE == "drive":
+    CACHE_ROOT = MODEL_ROOT
+    print("MODEL_CACHE 가 \"drive\" 이므로 Drive 캐시를 사용합니다:", CACHE_ROOT)
+elif MODEL_CACHE == "local":
+    CACHE_ROOT = LOCAL_MODEL_ROOT
+    print("MODEL_CACHE 가 \"local\" 이므로 가상 머신 로컬 디스크를 사용합니다:", CACHE_ROOT)
+elif MODEL_CACHE == "auto":
+    _snap_path = RUN_ROOT_P / "model_snapshot.json"
+    _snap_cache = ""
+    if _snap_path.exists():
+        _snap_cache = json.loads(_snap_path.read_text(encoding="utf-8")).get("cache_dir") or ""
+    if _snap_cache and Path(_snap_cache).is_dir():
+        CACHE_ROOT = _snap_cache
+        print("20번 노트북이 쓴 가중치 캐시를 그대로 사용합니다:", CACHE_ROOT)
+    else:
+        _drive_free = _free_gb(MODEL_ROOT)
+        if _drive_free >= MODEL_CACHE_NEED_GB:
+            CACHE_ROOT = MODEL_ROOT
+            print("Drive 여유가 %.1fGB이므로 Drive 캐시를 사용합니다: %s" % (_drive_free, CACHE_ROOT))
+        else:
+            CACHE_ROOT = LOCAL_MODEL_ROOT
+            print("Drive 여유가 %.1fGB뿐이라 %.0fGB에 못 미치므로 로컬 디스크 캐시를 사용합니다: %s"
+                  % (_drive_free, MODEL_CACHE_NEED_GB, CACHE_ROOT))
+            print("런타임이 회수되면 가중치가 사라지므로, 다시 접속할 때마다 내려받아야 합니다.")
+else:
+    raise RuntimeError("MODEL_CACHE 는 auto, drive, local 중 하나여야 합니다: %r" % (MODEL_CACHE,))
+
+MODEL_ROOT = CACHE_ROOT
 MODEL_ROOT_P = Path(MODEL_ROOT)
 MODEL_ROOT_P.mkdir(parents=True, exist_ok=True)
 os.environ["VQA_MODEL_ROOT"] = str(MODEL_ROOT_P)
 os.environ["HF_HOME"] = str(MODEL_ROOT_P)
+# HF_HOME만 지정하면 스냅샷이 HF_HOME/hub 아래에 놓입니다. 20번 노트북의 다운로드 셀은
+# --cache-dir 로 같은 경로를 지정하므로, 두 값을 맞춰 두어야 같은 가중치를 두 번 받지 않습니다.
+os.environ["HF_HUB_CACHE"] = str(MODEL_ROOT_P)
+
+CACHE_FREE_GB = _free_gb(MODEL_ROOT)
+print("캐시 여유 공간 : %.1fGB (27B 원본 스냅샷은 약 54GB입니다)" % CACHE_FREE_GB)
 
 # --- 지금 이 가상 머신의 VRAM을 직접 잽니다 ---
 VRAM_GB = 0.0
@@ -2657,42 +2774,108 @@ if _smi["rc"] == 0 and _smi["output"].strip():
 else:
     print("nvidia-smi를 쓸 수 없습니다. 런타임 유형이 GPU인지 확인하십시오.")
 
+# --- VRAM 하한을 먼저 확인합니다 ---
+# nf4로 양자화한 27B 가중치가 약 15GB이므로, 활성값과 KV 캐시까지 얹으려면 20GB는 있어야
+# 합니다. 이보다 작으면 추론조차 완주하지 못하므로 여기에서 멈춥니다.
+VRAM_MIN_INFER_GB = 20.0
+VRAM_MIN_TRAIN_GB = 35.0
+VRAM_BF16_GB = 70.0
+
+if VRAM_GB < VRAM_MIN_INFER_GB:
+    raise RuntimeError(
+        "감지된 VRAM이 %.1fGB입니다. 27B는 nf4로 양자화해도 가중치만 약 15GB이므로, "
+        "%.0fGB 미만에서는 추론도 완주하지 못합니다. 런타임 유형이 GPU인지 먼저 확인하시고, "
+        "GPU가 맞다면 런타임을 끊고 다시 연결해서 더 큰 GPU를 받으십시오. 계속 작은 GPU만 "
+        "배정된다면 docs/README_team.md 의 9B 경로로 전환해야 합니다."
+        % (VRAM_GB, VRAM_MIN_INFER_GB)
+    )
+
 # --- 정밀도를 정합니다 ---
+# 설정 파일을 바꾸는 대신 정밀도만 내릴 수 있도록, 먼저 "nf4가 필요한가"만 판정합니다.
 PRECISION_SUFFIX = ""
 TRAINING_ALLOWED = True
 
 if PRECISION_POLICY == "nf4":
-    RESOLVED_CONFIG, PRECISION = NF4_CONFIG, "nf4"
-elif PRECISION_POLICY == "auto":
-    if VRAM_GB >= 70:
-        RESOLVED_CONFIG, PRECISION = BF16_CONFIG, "bf16"
-    else:
-        RESOLVED_CONFIG, PRECISION = NF4_CONFIG, "nf4"
-elif PRECISION_POLICY == "bf16":
-    if VRAM_GB >= 70:
-        RESOLVED_CONFIG, PRECISION = BF16_CONFIG, "bf16"
-    else:
-        RESOLVED_CONFIG, PRECISION = NF4_CONFIG, "nf4"
-        PRECISION_SUFFIX = "_nf4"
-        TRAINING_ALLOWED = False
-        print("=" * 72)
-        print("경고: 팀 정책은 bf16인데 이 GPU의 VRAM은 %.1fGB뿐입니다." % VRAM_GB)
-        print("이 가상 머신에서는 bf16 학습을 시작할 수도, 이어서 할 수도 없습니다.")
-        print("80GB A100을 받으려면 런타임을 끊고 다시 연결하십시오.")
-        print("계속 진행하면 추론만 nf4로 돌리며, run-id 뒤에 \"_nf4\"를 붙여서")
-        print("bf16 결과와 캐시가 절대 섞이지 않게 합니다.")
-        print("=" * 72)
+    WANT_NF4 = True
+elif PRECISION_POLICY in ("auto", "bf16"):
+    WANT_NF4 = VRAM_GB < VRAM_BF16_GB
 else:
     raise RuntimeError(
         "PRECISION_POLICY 는 bf16, auto, nf4 중 하나여야 합니다: %r" % (PRECISION_POLICY,))
 
-# 파라미터 셀에서 CONFIG를 직접 적었다면 그 값이 언제나 우선합니다.
+if WANT_NF4 and PRECISION_POLICY == "bf16":
+    PRECISION_SUFFIX = "_nf4"
+    TRAINING_ALLOWED = False
+    print("=" * 72)
+    print("경고: 팀 정책은 bf16인데 이 GPU의 VRAM은 %.1fGB뿐입니다." % VRAM_GB)
+    print("이 가상 머신에서는 bf16 학습을 시작할 수도, 이어서 할 수도 없습니다.")
+    print("80GB A100을 받으려면 런타임을 끊고 다시 연결하십시오.")
+    print("계속 진행하면 추론만 nf4로 돌리며, run-id 뒤에 \"_nf4\"를 붙여서")
+    print("bf16 결과와 캐시가 절대 섞이지 않게 합니다.")
+    print("=" * 72)
+
+# 파라미터 셀에서 CONFIG를 직접 적었다면 그 파일이 언제나 우선합니다. 비워 두었을 때에만
+# 정밀도에 맞는 설정 파일을 고릅니다.
 if CONFIG:
     RESOLVED_CONFIG = CONFIG
     print("파라미터 셀의 CONFIG를 그대로 사용합니다:", RESOLVED_CONFIG)
+else:
+    RESOLVED_CONFIG = NF4_CONFIG if WANT_NF4 else BF16_CONFIG
 CONFIG = RESOLVED_CONFIG
 if not Path(CONFIG).exists():
     raise RuntimeError("config 파일이 없습니다: %s" % CONFIG)
+
+# --- 확정된 설정 파일에서 정밀도와 해상도를 다시 읽습니다 ---
+# CONFIG를 직접 적었을 때에도 화면에 출력하는 정밀도와 run-id가 실제 설정과 어긋나지 않게
+# 하려는 것입니다. 파일 이름이 아니라 설정 로더를 거치므로 값이 유효한지도 여기에서 걸러집니다.
+from vqa import config as _config_mod
+
+
+def precision_overrides_for(config_path):
+    """설정 파일의 정밀도가 이 GPU에 맞지 않으면 덮어쓸 인자를 돌려줍니다.
+
+    설정 파일을 nf4 파일로 바꿔 버리면 그 파일에 적힌 해상도까지 함께 바뀝니다. 확대본을
+    고른 실행에서 그렇게 하면 min_pixels 상향이 조용히 사라지므로, 파일은 그대로 두고
+    정밀도만 --set 으로 내립니다.
+    """
+    file_precision = str(_config_mod.get_path(_config_mod.load_config(config_path), "precision"))
+    if WANT_NF4 and file_precision != "nf4":
+        return ["--set", "precision=nf4"]
+    return []
+
+
+PRECISION_OVERRIDES = precision_overrides_for(CONFIG)
+_cfg_preview = _config_mod.load_config(CONFIG, PRECISION_OVERRIDES[1:] or None)
+PRECISION = str(_config_mod.get_path(_cfg_preview, "precision"))
+MIN_PIXELS = int(_config_mod.get_path(_cfg_preview, "min_pixels"))
+MAX_PIXELS = int(_config_mod.get_path(_cfg_preview, "max_pixels"))
+if PRECISION_OVERRIDES:
+    print("설정 파일은 그대로 두고 정밀도만 내립니다: %s" % " ".join(PRECISION_OVERRIDES))
+
+# 확대본을 쓰면 run-id에 "_upscale"을 붙여서 기존 결과와 섞이지 않게 합니다.
+UPSCALE = "upscale" in Path(CONFIG).stem
+RES_SUFFIX = "_upscale" if UPSCALE else ""
+
+# 27B 학습은 nf4로 낮춰도 40GB급 VRAM이 필요합니다. 그보다 작은 GPU에서는 추론만 허용합니다.
+if VRAM_GB < VRAM_MIN_TRAIN_GB:
+    TRAINING_ALLOWED = False
+    print("=" * 72)
+    print("안내: VRAM이 %.1fGB이므로 이 가상 머신에서는 학습을 허용하지 않습니다." % VRAM_GB)
+    print("27B 학습은 nf4로 낮춰도 %.0fGB 이상이 필요합니다. 추론은 그대로 진행할 수 있습니다."
+          % VRAM_MIN_TRAIN_GB)
+    print("=" * 72)
+
+# 확대본은 평균 시각 토큰이 1.46배이므로 40GB 가상 머신에서는 nf4로도 학습이 위험합니다.
+# 정밀도 정책이 무엇이든, 여기에서 한 번 더 학습을 막습니다.
+if VRAM_GB < VRAM_BF16_GB and (UPSCALE or PRECISION == "bf16"):
+    TRAINING_ALLOWED = False
+    print("=" * 72)
+    print("경고: 설정 %s 는 VRAM이 70GB 이상일 때를 전제로 합니다." % CONFIG)
+    print("이 가상 머신의 VRAM은 %.1fGB뿐이므로 학습을 시작할 수도, 이어서 할 수도 없습니다." % VRAM_GB)
+    if UPSCALE:
+        print("확대본은 평균 시각 토큰이 1.46배여서 정밀도를 낮춰도 학습 활성값이 들어가지 않습니다.")
+    print("추론은 그대로 진행할 수 있습니다. 학습까지 하려면 80GB A100을 받아야 합니다.")
+    print("=" * 72)
 
 # --- 학습 범위를 정합니다 ---
 # "full" 은 fold 0까지 학습에 넣으므로, 그 run의 fold 0 정확도는 학습 데이터를 다시 맞힌
@@ -2712,10 +2895,16 @@ if not Path(SPLIT_FILE).exists():
 PROMPT_SUFFIX = "" if PROMPT_ID == "v1_image_only" else "_" + PROMPT_ID
 
 
-def resolve_run_id(stem, prompt_id=None):
-    """기본 이름에 프롬프트 접미사와 정밀도 접미사를 붙여 실제 run-id를 만듭니다."""
+def resolve_run_id(stem, prompt_id=None, res_suffix=None):
+    """기본 이름에 프롬프트, 해상도, 정밀도 접미사를 차례로 붙여 실제 run-id를 만듭니다.
+
+    해상도를 정밀도보다 앞에 붙이는 까닭은, 기본 해상도에서 nf4로 내려간 기존 run-id를
+    그대로 두면서 확대본에서 nf4로 내려간 run-id를 "_upscale_nf4" 로 읽히게 하기
+    위해서입니다.
+    """
     suffix = "" if (prompt_id or PROMPT_ID) == "v1_image_only" else "_" + (prompt_id or PROMPT_ID)
-    return stem + suffix + PRECISION_SUFFIX
+    res = RES_SUFFIX if res_suffix is None else res_suffix
+    return stem + suffix + res + PRECISION_SUFFIX
 
 
 BASE_RUN = resolve_run_id(BASE_RUN_ID)
@@ -2724,18 +2913,32 @@ BASE_RUN = resolve_run_id(BASE_RUN_ID)
 FT_RUN = resolve_run_id(FT_RUN_ID + SCOPE_SUFFIX)
 CMP_RUN = resolve_run_id(BASE_RUN_ID, COMPARE_PROMPT_ID)
 
+# 해상도 비교(10-1절)에 쓰는 run-id입니다. 프롬프트와 정밀도는 9번 절과 같게 두고 해상도만
+# 다르게 두어야, 두 결과의 차이를 해상도 하나로 설명할 수 있습니다.
+RES_CMP_UPSCALE = "upscale" in Path(RESOLUTION_COMPARE_CONFIG).stem
+RES_CMP_RUN = resolve_run_id(BASE_RUN_ID, res_suffix="_upscale" if RES_CMP_UPSCALE else "")
+
 if not MIN_FREE_GB:
-    MIN_FREE_GB = 60 if PRECISION == "bf16" else 20
+    if PRECISION == "bf16":
+        MIN_FREE_GB = 60
+    elif VRAM_GB < 26:
+        # L4 24GB에서는 여유 하한을 20으로 두면 시작조차 거부됩니다.
+        MIN_FREE_GB = 16
+    else:
+        MIN_FREE_GB = 20
 
 print()
 print("GPU              : %s / VRAM %.1fGB" % (GPU_NAME, VRAM_GB))
 print("정밀도 정책      : %s -> %s" % (PRECISION_POLICY, PRECISION))
 print("적용 중인 config : %s" % CONFIG)
+print("해상도           : min_pixels=%d, max_pixels=%d%s (시각 토큰 수는 8번 절 pixel_limits가 실측합니다)"
+      % (MIN_PIXELS, MAX_PIXELS, " [작은 이미지 확대본]" if UPSCALE else ""))
 print("프롬프트         : %s" % PROMPT_ID)
 print("학습 범위        : %s (%s)" % (TRAIN_SCOPE, SPLIT_FILE))
 print("base run-id      : %s" % BASE_RUN)
 print("ft run-id        : %s" % FT_RUN)
-print("비교용 run-id    : %s (선택 단계에서만 사용합니다)" % CMP_RUN)
+print("프롬프트 비교 run-id : %s (선택 단계에서만 사용합니다)" % CMP_RUN)
+print("해상도 비교 run-id   : %s (선택 단계에서만 사용합니다)" % RES_CMP_RUN)
 print("학습 허용        : %s" % TRAINING_ALLOWED)
 print("GPU 여유 하한    : %s GB" % MIN_FREE_GB)
 print("가중치 캐시      : %s" % os.environ["VQA_MODEL_ROOT"])
@@ -2747,6 +2950,84 @@ if _choice_path.exists():
     print("참고: 20번 노트북은 VRAM %s GB에서 %s 를 골랐습니다 (정책 %s)."
           % (_choice.get("vram_gb"), _choice.get("config"), _choice.get("policy", "미기록")))
     print("이 값은 참고로만 출력하며, 지금 실행에는 위에서 정한 값을 씁니다.")
+'''))
+
+    cells.append(md("""
+## 5-1. 가중치 확보
+
+20번 노트북을 돌리지 않았거나, 20번을 돌린 계정과 다른 계정으로 접속했다면 캐시에 가중치가
+없습니다. 그대로 두면 9번 절의 추론 job이 시작하자마자 약 54GB를 내려받게 되고, 그 도중에
+job이 재시작되면 받던 파일을 처음부터 다시 받는 일이 생깁니다. 그래서 이 절에서 먼저
+내려받습니다. 이미 받아 둔 스냅샷이 있으면 아무 일도 하지 않습니다.
+
+`nf4` 로 돌리더라도 내려받는 파일은 같습니다. 양자화는 원본 bf16 스냅샷을 읽어서 메모리에
+올리는 시점에 수행하므로, 캐시에는 언제나 원본 크기인 약 54GB가 필요합니다.
+
+Qwen3.5는 접근 승인이 필요한 모델이 아니므로 토큰이 없어도 받을 수 있습니다. 다만 같은
+주소에서 여러 번 받으면 익명 요청의 속도 제한에 걸릴 수 있습니다. Hugging Face에서 읽기
+권한 토큰을 만들어 Colab 비밀 `HF_TOKEN` 으로 등록해 두면 이 셀이 그 값을 사용합니다.
+"""))
+
+    cells.append(code(r'''
+# Hugging Face 토큰이 등록되어 있으면 씁니다. 없어도 Qwen3.5는 받을 수 있습니다.
+try:
+    from google.colab import userdata as _userdata
+
+    _hf_token = _userdata.get("HF_TOKEN")
+except Exception:
+    # SecretNotFoundError, NotebookAccessError, ImportError를 모두 여기에서 받습니다.
+    _hf_token = None
+if _hf_token:
+    os.environ["HF_TOKEN"] = _hf_token
+    print("Colab 비밀 HF_TOKEN을 찾아서 환경 변수에 넣었습니다.")
+    del _hf_token
+else:
+    print("HF_TOKEN이 없어 익명으로 내려받습니다. 속도 제한 오류가 나면 토큰을 등록하십시오.")
+
+SNAPSHOT_DIR = (MODEL_ROOT_P / ("models--" + MODEL_ID.replace("/", "--"))
+                / "snapshots" / MODEL_REVISION)
+print("기대하는 스냅샷 위치:", SNAPSHOT_DIR)
+
+if SNAPSHOT_DIR.is_dir():
+    print("가중치가 이미 캐시에 있습니다. 내려받지 않습니다.")
+elif not DOWNLOAD_WEIGHTS:
+    print("DOWNLOAD_WEIGHTS 가 False이므로 내려받지 않습니다.")
+    print("가중치가 없으면 9번 절의 추론 job이 시작하면서 직접 내려받습니다.")
+else:
+    if CACHE_FREE_GB < MODEL_CACHE_NEED_GB:
+        raise RuntimeError(
+            "캐시 위치 %s 의 여유가 %.1fGB뿐이라 약 54GB짜리 스냅샷이 들어가지 않습니다. "
+            "파라미터 셀의 MODEL_CACHE 를 \"local\" 로 바꿔서 가상 머신 로컬 디스크에 받거나, "
+            "Drive를 정리한 다음 5번 절부터 다시 실행하십시오."
+            % (MODEL_ROOT, CACHE_FREE_GB)
+        )
+    _hf_bin = shutil.which("hf") or shutil.which("huggingface-cli")
+    if _hf_bin:
+        _dl = run([_hf_bin, "download", MODEL_ID, "--revision", MODEL_REVISION,
+                   "--cache-dir", str(MODEL_ROOT_P)], check=False)
+    else:
+        print("hf 명령을 찾지 못해 python 모듈로 받습니다.")
+        os.environ["VQA_MODEL_ID"] = MODEL_ID
+        os.environ["VQA_MODEL_REV"] = MODEL_REVISION
+        _dl = run([PY, "-c",
+                   "import os, huggingface_hub as h;"
+                   "p=h.snapshot_download(os.environ['VQA_MODEL_ID'],"
+                   " revision=os.environ['VQA_MODEL_REV'],"
+                   " cache_dir=os.environ['HF_HUB_CACHE']);"
+                   "print('snapshot:', p)"], check=False)
+    if _dl["rc"] != 0:
+        raise RuntimeError(
+            "가중치를 내려받지 못했습니다. 위 출력에서 원인을 확인하십시오. 이미 받은 부분은 "
+            "캐시에 남아 있으므로 이 셀을 다시 실행하면 이어서 받습니다."
+        )
+    (RUN_ROOT_P / "model_snapshot.json").write_text(
+        json.dumps({"model_id": MODEL_ID, "revision": MODEL_REVISION,
+                    "cache_dir": str(MODEL_ROOT_P),
+                    "download_seconds": round(_dl["seconds"], 1)},
+                   ensure_ascii=False, indent=2), encoding="utf-8")
+    print("내려받기를 %.1f분 만에 마쳤습니다." % (_dl["seconds"] / 60.0))
+
+print("캐시 여유 공간 : %.1fGB" % _free_gb(MODEL_ROOT))
 '''))
 
     cells.append(md("""
@@ -2804,12 +3085,15 @@ if not AUTO_RESTART:
 JOB_EXTRA = ["--auto-restart", str(AUTO_RESTART)]
 ALSO_BASE_ARGS = ["--also-base"] if ALSO_BASE else []
 
-OVERRIDES = ["--set", "prompt_id=%s" % PROMPT_ID]
+OVERRIDES = ["--set", "prompt_id=%s" % PROMPT_ID] + PRECISION_OVERRIDES
 _frozen_path = Path("artifacts/input_config_frozen.json")
 if _frozen_path.exists():
     _frozen = json.loads(_frozen_path.read_text(encoding="utf-8"))
     _mp = (_frozen.get("max_pixels") or {}).get("colab_qwen35_27b")
-    if _mp:
+    if _mp and UPSCALE:
+        # 확대본을 고른 실행에서 동결 값을 덮어쓰면 확대한 이미지가 다시 잘립니다.
+        print("확대본을 쓰므로 동결 파일의 max_pixels=%d 는 적용하지 않습니다." % _mp)
+    elif _mp:
         OVERRIDES += ["--set", "max_pixels=%d" % _mp]
         print("동결 파일에서 max_pixels=%d 를 가져왔습니다." % _mp)
     if _frozen.get("prompt_id") and _frozen["prompt_id"] != PROMPT_ID:
@@ -2823,6 +3107,25 @@ def overrides_for(prompt_id):
     for index, item in enumerate(out):
         if isinstance(item, str) and item.startswith("prompt_id="):
             out[index] = "prompt_id=%s" % prompt_id
+    return out
+
+
+def drop_override(args, key):
+    """`--set <key>=...` 쌍을 목록에서 걷어냅니다.
+
+    설정 파일이 다른 실행에 같은 override를 그대로 넘기면 그 파일에 적힌 값이 덮여 버립니다.
+    해상도 비교에서 확대본의 max_pixels 와 precision 이 바로 그런 값입니다.
+    """
+    out = []
+    index = 0
+    while index < len(args):
+        item = args[index]
+        if (item == "--set" and index + 1 < len(args)
+                and str(args[index + 1]).startswith(key + "=")):
+            index += 2
+            continue
+        out.append(item)
+        index += 1
     return out
 
 
@@ -3002,6 +3305,13 @@ print("입력 설정 :", OVERRIDES)
 - `pixel_limits` 는 설정한 `min_pixels` 와 `max_pixels` 가 processor에 실제로 적용되었는지를
   가장 큰 이미지와 가장 작은 이미지로 직접 확인합니다. 시각 토큰 수가 기대 상한을 넘으면
   FAIL로 표시됩니다.
+- `forward_backward` 의 `peak_vram_gb` 는 학습이 실제로 쓸 메모리의 근사값입니다. 이 검사가
+  OOM을 보려고 고르는 표본은 원래 질문과 선택지의 글자 수가 가장 긴 문항이었습니다. 그런데
+  메모리를 지배하는 쪽은 글자가 아니라 시각 토큰이므로, 해상도를 올린 설정에서는 가장 큰
+  이미지가 표본에 한 장도 들어가지 않을 수 있습니다. 그러면 preflight를 통과하고도 본 학습
+  도중에 out of memory가 납니다. 그래서 이 노트북은 `--largest-image-samples` 로 원본 픽셀
+  수가 가장 큰 이미지 `PREFLIGHT_LARGEST_IMAGES` 장을 OOM 표본에 강제로 넣습니다. 어떤
+  문항이 들어갔는지는 요약의 `largest_image_samples` 에 나옵니다.
 - `kernel_fast_path` 는 Gated DeltaNet이 가속 커널을 쓰는지 봅니다. 참조 구현으로 내려갔으면
   WARN으로 표시하고 설치 명령을 함께 알려 줍니다. 학습 자체는 가능하므로 종료 코드는 0입니다.
   다만 학습 시간이 약 두 배가 되므로 그대로 진행할지 먼저 판단하십시오.
@@ -3066,17 +3376,26 @@ def show_preflight_summary(before):
 
     show_detail("forward_backward", "학습 속도 (microbatch 1개 기준)",
                 ("sec_per_microbatch_mean", "sec_prepare_mean", "sec_compute_mean",
-                 "sec_per_optimizer_step", "peak_vram_gb"))
+                 "sec_per_optimizer_step", "peak_vram_gb", "peak_vram_gb_longest",
+                 "largest_image_samples"))
     show_detail("inference", "추론 속도 (문항 1개 기준)",
                 ("seconds_per_item", "sec_prepare_mean", "sec_compute_mean"))
     print()
     print("기록: %s" % path)
 
 
+# 학습을 허용하지 않는 가상 머신에서는 학습 점검을 생략합니다. forward+backward는 역전파
+# 활성값까지 올리므로, 추론만 하려는 24GB급 GPU에서는 이 점검 하나 때문에 out of memory가
+# 납니다. --n-train-steps 를 0으로 주면 preflight가 forward_backward를 SKIP으로 남깁니다.
+PF_TRAIN_STEPS = PREFLIGHT_TRAIN_STEPS if TRAINING_ALLOWED else 0
+if not PF_TRAIN_STEPS:
+    print("학습을 허용하지 않는 가상 머신이므로 preflight의 학습 점검을 생략하고 추론만 봅니다.")
+
 cmd = [PY, "-m", "vqa.preflight",
        "--config", CONFIG,
-       "--n-train-steps", str(PREFLIGHT_TRAIN_STEPS),
-       "--n-infer", str(PREFLIGHT_INFER_ITEMS)] + OVERRIDES
+       "--n-train-steps", str(PF_TRAIN_STEPS),
+       "--n-infer", str(PREFLIGHT_INFER_ITEMS),
+       "--largest-image-samples", str(PREFLIGHT_LARGEST_IMAGES)] + OVERRIDES
 _pf_before = preflight_results()
 try:
     gpu_step(PF_JOB, cmd, auto_restart=PREFLIGHT_RESTARTS)
@@ -3145,6 +3464,116 @@ else:
            "--label-a", PROMPT_ID, "--label-b", COMPARE_PROMPT_ID,
            "--json-out", "artifacts/eval/prompt_compare.json",
            check=False)
+'''))
+
+    cells.append(md("""
+## 10-1. (선택) 해상도를 바꾸어 비교합니다
+
+이 절도 선택입니다. `RUN_RESOLUTION_COMPARE` 가 `False` 이면 아무 일도 하지 않고 넘어갑니다.
+fold 0의 1,344문항을 한 번 더 추론하므로 9번 절과 같은 만큼의 GPU 시간이 듭니다. 확대본은 시각
+토큰이 늘어나므로 실제로는 조금 더 걸립니다.
+
+바꾸는 것은 해상도 하나뿐입니다. 프롬프트도 정밀도도 9번 절과 같게 두고 `min_pixels` 만 올린
+`RESOLUTION_COMPARE_CONFIG` 로 추론합니다. 결과는 `_upscale` 이 붙은 별도의 run-id에 저장되므로
+9번 절의 결과를 덮어쓰지 않습니다. 확대본이 원래 담고 있는 `max_pixels` 상향도 그대로 살려야
+하므로, 이 절은 동결 파일에서 가져온 `max_pixels` 덮어쓰기를 걷어낸 다음에 실행합니다.
+
+추론이 끝나면 두 가지를 확인하십시오. 먼저 `compare_predictions.py` 가 McNemar 검정으로 전체
+1,344문항의 차이를 검정합니다. 그다음에 `ERROR_TYPES_CSV` 에서 판정이 `모델 오류: 작은 글자`
+인 문항만 뽑아, 그 문항들이 기본 해상도와 확대본에서 각각 맞았는지 틀렸는지를 표로 출력합니다.
+해상도를 올린 까닭이 바로 그 문항들이므로, 전체 정확도가 거의 그대로여도 이 표에서 개선이
+보이면 방향은 맞다고 판단할 수 있습니다. 판정 파일이 없으면 이 표만 건너뜁니다.
+"""))
+
+    cells.append(code(r'''
+if not RUN_RESOLUTION_COMPARE:
+    print("RUN_RESOLUTION_COMPARE 가 False이므로 해상도 비교를 건너뜁니다.")
+elif RES_CMP_RUN == BASE_RUN:
+    raise RuntimeError(
+        "해상도 비교 설정 %s 가 9번 절의 설정과 같은 run-id를 만듭니다. 두 결과가 한 폴더에 "
+        "섞이므로 실행하지 않습니다. 파라미터 셀의 CONFIG 와 RESOLUTION_COMPARE_CONFIG 를 "
+        "서로 다른 해상도로 맞추십시오." % RESOLUTION_COMPARE_CONFIG
+    )
+else:
+    # 확대본에 적힌 max_pixels 와 precision 을 덮어쓰지 않도록 두 값을 걷어낸 다음, 이 설정
+    # 파일에 맞는 정밀도 덮어쓰기만 다시 붙입니다.
+    RES_CMP_OVERRIDES = drop_override(drop_override(OVERRIDES, "max_pixels"), "precision")
+    RES_CMP_OVERRIDES += precision_overrides_for(RESOLUTION_COMPARE_CONFIG)
+    print("해상도 비교 설정 :", RESOLUTION_COMPARE_CONFIG)
+    print("입력 설정        :", RES_CMP_OVERRIDES)
+    cmd = [PY, "-m", "vqa.predict",
+           "--config", RESOLUTION_COMPARE_CONFIG, "--run-id", RES_CMP_RUN,
+           "--csv", "train.csv", "--ids-file", VAL_IDS_FILE,
+           "--adapter", "none", "--out-name", VAL_OUT_BASE] + RES_CMP_OVERRIDES
+    gpu_step(RES_CMP_RUN + "_val", cmd, done=pred_done(RES_CMP_RUN, VAL_OUT_BASE))
+'''))
+
+    cells.append(code(r'''
+if not RUN_RESOLUTION_COMPARE:
+    print("RUN_RESOLUTION_COMPARE 가 False이므로 해상도 비교 평가를 건너뜁니다.")
+elif not (pred_done(BASE_RUN, VAL_OUT_BASE) and pred_done(RES_CMP_RUN, VAL_OUT_BASE)):
+    print("비교에 필요한 예측 두 개가 아직 모두 끝나지 않아 이 셀은 건너뜁니다.")
+    print("  기본 해상도 fold 0 : %s" % ("완료" if pred_done(BASE_RUN, VAL_OUT_BASE) else "미완료"))
+    print("  확대본 fold 0      : %s" % ("완료" if pred_done(RES_CMP_RUN, VAL_OUT_BASE) else "미완료"))
+else:
+    evaluate(pred_file(RES_CMP_RUN, VAL_OUT_BASE), RES_CMP_RUN + "_" + VAL_OUT_BASE,
+             "27B 원본, 해상도 확대본, 정밀도 %s" % PRECISION)
+    script("compare_predictions.py",
+           "--pred-a", str(pred_file(BASE_RUN, VAL_OUT_BASE)),
+           "--pred-b", str(pred_file(RES_CMP_RUN, VAL_OUT_BASE)),
+           "--gold", str(DATA_ROOT_P / "train.csv"),
+           "--val-ids", VAL_IDS_FILE,
+           "--label-a", "base_res", "--label-b", "upscale",
+           "--changed-out", "artifacts/eval/resolution_compare_changed.csv",
+           "--json-out", "artifacts/eval/resolution_compare.json",
+           check=False)
+
+    # --- 작은 글자 때문에 틀렸다고 판정한 문항만 따로 봅니다 ---
+    from vqa.evaluate import load_gold as _load_gold
+    from vqa.predictions import decide_answers as _decide, load_predictions as _load_preds
+
+    _err_path = Path(ERROR_TYPES_CSV)
+    if not _err_path.exists():
+        print()
+        print("%s 가 없어서 작은 글자 문항 표는 건너뜁니다." % _err_path)
+        print("이 파일은 fold 0 오답 점검 결과이며, 저장소의 artifacts/data 아래에 있습니다.")
+    else:
+        _small = [r["id"] for r in read_csv_rows(_err_path)
+                  if (r.get("consensus") or "").strip() == SMALL_TEXT_CONSENSUS]
+        _gold = _load_gold(str(DATA_ROOT_P / "train.csv")).set_index("id")["answer"].to_dict()
+        _a = _decide(_load_preds(pred_file(BASE_RUN, VAL_OUT_BASE))).set_index("id")["answer"].to_dict()
+        _b = _decide(_load_preds(pred_file(RES_CMP_RUN, VAL_OUT_BASE))).set_index("id")["answer"].to_dict()
+
+        print()
+        print("=" * 72)
+        print("판정이 \"%s\" 인 %d문항의 정오 변화" % (SMALL_TEXT_CONSENSUS, len(_small)))
+        print("=" * 72)
+        print("  %-18s %6s %8s %8s  %s" % ("id", "정답", "기본", "확대본", "변화"))
+        _counts = {"개선": 0, "악화": 0, "여전히 오답": 0, "계속 정답": 0, "예측 없음": 0}
+        for _id in _small:
+            _g = _gold.get(_id)
+            _pa, _pb = _a.get(_id), _b.get(_id)
+            if _g is None or _pa is None or _pb is None:
+                _label = "예측 없음"
+            else:
+                _ok_a, _ok_b = (_pa == _g), (_pb == _g)
+                if _ok_a and _ok_b:
+                    _label = "계속 정답"
+                elif _ok_b:
+                    _label = "개선"
+                elif _ok_a:
+                    _label = "악화"
+                else:
+                    _label = "여전히 오답"
+            _counts[_label] += 1
+            print("  %-18s %6s %8s %8s  %s"
+                  % (_id, _g or "?", _pa or "?", _pb or "?", _label))
+        print("-" * 72)
+        print("  " + "  ".join("%s %d건" % kv for kv in _counts.items() if kv[1]))
+        print()
+        print("개선과 악화의 건수를 함께 보십시오. 13문항은 표본이 작아서 개선 두세 건만으로는")
+        print("해상도 상향이 효과가 있다고 단정할 수 없습니다. 전체 1,344문항의 McNemar 결과와")
+        print("함께 판단하시고, 두 결과가 어긋나면 그 사실을 그대로 팀 채널에 공유하십시오.")
 '''))
 
     cells.append(md("""
@@ -3416,6 +3845,10 @@ else:
 JOB_NAMES = ["preflight_" + PRECISION,
              BASE_RUN + "_val", BASE_RUN + "_test",
              FT_RUN + "_train", FT_RUN + "_val", FT_RUN + "_test"]
+if RUN_PROMPT_COMPARE:
+    JOB_NAMES.append(CMP_RUN + "_val")
+if RUN_RESOLUTION_COMPARE:
+    JOB_NAMES.append(RES_CMP_RUN + "_val")
 
 lines = ["===== Colab 27B 실행 상태 ====="]
 lines.append("시각      : %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -3428,7 +3861,10 @@ for name in JOB_NAMES:
               check=False, quiet=True, echo=False, hint=False)
     first = res["output"].strip().splitlines()
     lines.append("%-30s %s" % (name, first[0] if first else "기록 없음"))
-for run_id in (BASE_RUN, FT_RUN):
+REPORT_RUNS = [BASE_RUN, FT_RUN]
+if RUN_RESOLUTION_COMPARE:
+    REPORT_RUNS.append(RES_CMP_RUN)
+for run_id in REPORT_RUNS:
     pred_dir = RUN_ROOT_P / run_id / "preds"
     if pred_dir.is_dir():
         for f in sorted(pred_dir.glob("*.csv")):
