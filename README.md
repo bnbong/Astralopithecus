@@ -1,5 +1,7 @@
 # 텍스트 이미지 기반 질의응답(VQA) 챌린지
 
+대회 제출용 설명 문서는 [`docs/submission_report.md`](docs/submission_report.md)에 있습니다. 데이터 처리와 모델 개발 과정, 재현 절차를 한 파일로 정리했습니다.
+
 이미지 한 장과 질문 하나, a부터 d까지 네 개의 선지를 받아서 정답 하나를 고릅니다. 평가 지표는 정확도입니다. Colab에서 Qwen3.5-27B를, 실습실 PC에서 Qwen3.5-9B를 answer-only LoRA로 학습합니다. 각 모델이 낸 선지별 확률을 고정 validation에서 비교해 결합합니다. 설계 근거는 `vqa_5day_implementation_plan.md`에, 인계 순서와 게이트 조건은 `docs/README_team.md`에 있습니다.
 
 ## 데이터
@@ -61,7 +63,7 @@ GPU를 쓰는 작업은 한 번에 하나만 돌립니다. `vqa.jobs start`는 �
 - 공식 검증셋은 fold 0의 1,344문항입니다. 파일은 `fold_csv_files/val_fold0.csv`입니다. 학습에는 `fold_csv_files/train_fold1234.csv`의 5,358문항을 씁니다. 이 파일에서는 test와 이미지가 동일한 train 24문항을 이미 빼 두었습니다.
 - 두 CSV를 합친 `artifacts/data/split_fold0.json`이 `vqa.train --split` 에 넘기는 공식 파일입니다. `python scripts/folds_to_split.py`로 다시 만들 수 있고, 내용 해시는 `ea2c8572129342f138c551e6e32a3427902c730db349c45d0e5342f03dfccae0`입니다. 값이 다르면 즉시 팀 채널에 알리십시오.
 - 검증 500문항을 쓰던 `artifacts/data/split_v1.json`은 폐기했습니다. 자세한 내용은 `artifacts/data/README.md`에 적어 두었습니다.
-- 넘어야 할 기준선은 Qwen2.5-VL-3B zero-shot에 프롬프트 p2를 쓴 fold 0 정확도 0.9159입니다. 같은 모델의 Kaggle public 점수는 0.89871입니다.
+- 넘어야 할 기준선은 Qwen2.5-VL-3B zero-shot에 프롬프트 p2를 쓴 fold 0 정확도 0.9159(초기 측정값이며, 1,344문항 전체 재측정의 최종값은 0.9144)입니다. 같은 모델의 Kaggle public 점수는 0.89871입니다.
 - fold 0과 학습 분할에 걸쳐 있는 근접 중복 이미지가 한 쌍 남아 있습니다. `train_0395.jpg`와 `train_4458.jpg`이며 perceptual hash로만 일치합니다. 문항 수로 보면 영향이 무시할 만한 수준이라서 그대로 둡니다.
 - test로는 어떤 조정도 하지 않습니다. 프롬프트와 하이퍼파라미터는 fold 0에서만 비교합니다.
 - 예측 확률 파일의 컬럼은 `id,p_a,p_b,p_c,p_d,run_id` 순서를 지킵니다.

@@ -129,9 +129,30 @@ EasyOCR보다 뚜렷하게 나은 엔진임을 확인했더라도, 위에서 측
 0.974에 근접한 값으로 봅니다. 확대 설정을 추가해도 비용은 거의 늘지 않았습니다. step
 시간은 13.5초에서 14.9초로, peak VRAM은 57GB에서 60GB로 늘었을 뿐입니다.
 
-test 추론과 Kaggle Public 점수는 아직 진행 중입니다 [확인 필요]. 실행본은
+확대 LoRA(⑦, run-id `colab27b_ft_bf16_v2_read_text_upscale`)의 test 추론은 끝났고
+Kaggle Public 점수는 0.96931입니다. 실행본은
 `results/21_colab_27b_run_20260922_A100-80GB_bf16_upscale_v2_read_text_personal.ipynb`
-경로에 남길 예정이며, 이 문서를 작성하는 시점에는 아직 push하지 못했습니다.
+경로에 보관되어 있습니다.
+
+이후 확대 설정 LoRA(⑦, run-id `colab27b_ft_bf16_v2_read_text_upscale`)를 test에 적용해
+제출한 결과 Public 점수는 0.96931로 나타났으며, 지금까지 나온 값 가운데 가장 높습니다.
+같은 확대·p2 조건에서 모델만 Qwen3.8-27B로 바꿔 zero-shot으로 돌려 본 후보(⑨)는 fold 0
+정확도가 0.9509에 그쳐 Qwen3.5-27B 확대 LoRA(0.9688)보다 낮았고, Qwen3.5만 맞힌 문항이
+35건으로 Qwen3.8만 맞힌 문항 11건보다 뚜렷이 많아서(McNemar p=0.0005) 기각했습니다.
+
+⑧(전체 데이터 확대 LoRA, run-id `colab27b_ft_bf16_full_v2_read_text_upscale`)을 test에
+적용해 제출한 결과 Public 점수는 0.96901로 나타났으며, ⑦(0.96931)과는 1~2문항 차이의
+동급입니다. 확대 LoRA는 이미 추정 상한(약 0.974)에 근접해 있어서, 학습 데이터를
+fold1234(5,358문항)에서 전체(6,690문항)로 1,332문항 늘렸는데도 추가로 오르는 폭이
+나타나지 않은 것으로 해석합니다. 같은 방식으로 데이터를 늘렸던 ③번 후보가
+0.15퍼센트포인트를 얻었던 것과는 대조됩니다. 최종 제출 두 개는 ⑦과 ⑧로 확정되었습니다.
+실행본은
+`results/21_colab_27b_run_20260922_A100-80GB_bf16_full_v2_read_text_upscale.ipynb`
+경로에 보관되어 있습니다.
+
+같은 확대·p2 조건에서 모델만 Qwen3.8-27B로 바꿔 zero-shot으로 돌려 본 후보(⑨)의 실행본은
+`results/21_colab_38_27b_run_20260922_A100-80GB_bf16_upscale_v2_read_text_personal.ipynb`
+경로에 보관되어 있습니다.
 
 ## fla 가속 커널 설치 전후 비교 (A100 80GB, bf16, LoRA)
 
