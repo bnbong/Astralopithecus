@@ -111,3 +111,76 @@ L4의 수치는 A100 대비 연산 성능을 놓고 잡은 어림값이므로, �
 예측은 이미 끝난 문항을 건너뛰고 남은 문항만 다시 추론합니다. 다시 접속했다면 1번 절의
 파라미터 셀부터 6번 절까지 다시 실행한 다음, 7번 절의 도우미 셀을 거쳐 중단된 절의 셀을 그대로
 다시 실행하십시오. 상황별 대응은 `docs/colab_survival.md`에 더 자세히 적어 두었습니다.
+
+## 8. Qwen3.8-27B 비교 실험
+
+Qwen3.8-27B는 2026년 8월에 공개된 모델이며, HF에 올라온 설정 파일을 확인해 보면 구조가
+Qwen3.5-27B와 같습니다. architectures가 `Qwen3_5ForConditionalGeneration`이고 model_type이
+`qwen3_5`이며, 64층에 linear attention 세 층마다 full attention 한 층이 오는 배치까지 같습니다.
+그래서 지금까지 쓰던 로더와 LoRA target 탐색 규칙, fla 가속 커널을 그대로 재사용합니다. 다만
+이 판단은 설정 파일만 읽고 내린 것이므로, 학습을 시작하기 전에 preflight로 실제 동작을 반드시
+확인해야 합니다.
+
+이 실험의 목적은 모델 하나만 바꾸었을 때 fold 0 정확도가 얼마나 달라지는지 재는 것입니다.
+`configs/colab_qwen38_27b_bf16_upscale.yaml`은 `configs/colab_qwen35_27b_bf16_upscale.yaml`을
+복사해서 `model_id`와 `revision`만 바꾼 파일입니다. 해상도와 프롬프트, LoRA 설정, 학습
+하이퍼파라미터가 모두 같으므로 두 실행의 차이를 모델 하나로 설명할 수 있습니다.
+
+### 1번 절에서 바꿀 값
+
+```python
+CONFIG = QWEN38_UPSCALE_CONFIG   # configs/colab_qwen38_27b_bf16_upscale.yaml
+PROMPT_ID = "v2_read_text"       # 3.5 확대본 실험과 같은 프롬프트를 씁니다
+TRAIN_SCOPE = "fold0"            # fold 1~4로 학습하고 fold 0을 검증으로 남겨 둡니다
+```
+
+`MODEL_ID`와 `MODEL_REVISION`은 고치지 마십시오. 5번 절이 `CONFIG`에서 직접 읽어서 덮어쓰고,
+5-1절의 가중치 내려받기도 그 값을 따라갑니다. 같은 값을 두 곳에 적어 두면 한쪽만 고쳤을 때
+내려받은 가중치와 추론이 올리는 가중치가 어긋나기 때문에 이렇게 만들었습니다.
+
+run-id는 모델에 따라 앞머리가 달라집니다. 위 설정으로 돌리면 원본 추론은
+`colab38_27b_base_bf16_v2_read_text_upscale`이 되고 학습은
+`colab38_27b_ft_bf16_v2_read_text_upscale`이 됩니다. Qwen3.5로 돌린 기존 run의 이름은
+`colab27b`으로 시작하므로 두 모델의 예측 파일이 같은 폴더에 섞이지 않습니다.
+
+가중치 캐시에는 주의가 필요합니다. Qwen3.5 스냅샷과 Qwen3.8 스냅샷이 각각 약 54GB이므로 두
+모델을 번갈아 돌리면 모두 108GB가 쌓입니다. Drive 여유가 그만큼 없다면 `MODEL_CACHE`를
+`"local"`로 두어 가상 머신의 로컬 디스크에 받으시고, 그래도 모자라면 다 쓴 쪽의
+`models--Qwen--Qwen3.5-27B` 폴더를 직접 지우십시오.
+
+### preflight에서 반드시 볼 항목
+
+8번 절의 preflight는 처음 보는 모델에서 가장 먼저 깨질 만한 곳을 짚어 줍니다. 아래 다섯 가지를
+확인하기 전에는 세 시간이 넘는 학습을 시작하지 마십시오.
+
+| 검사 이름 | 확인할 내용 |
+|---|---|
+| `chat_template_tail` | generation prompt가 빈 `<think></think>`로 끝나는지 봅니다. Qwen3.8은 thinking이 기본으로 켜져 있고 reasoning effort 기본값이 xhigh이므로, 이 검사가 FAIL이면 추론 결과 전체를 믿을 수 없습니다. |
+| `label_mask` | 표본마다 감독하는 토큰이 정확히 한 개인지 봅니다. 토크나이저가 달라져서 정답 글자가 여러 토큰으로 쪼개지면 여기에서 걸립니다. |
+| `train_infer_prefix_match` | 학습 텍스트의 앞부분과 추론 프롬프트가 바이트 단위로 같은지 봅니다. chat template이 학습 경로와 추론 경로에서 다르게 렌더링되면 여기에서 드러납니다. |
+| `kernel_fast_path` | Gated DeltaNet이 fla 가속 커널을 쓰는지 봅니다. 참조 구현으로 내려가면 학습 시간이 두 배 넘게 늘어나므로, 일정을 다시 잡을지 여기에서 판단합니다. |
+| `pixel_limits` | 확대본의 `min_pixels` 상향이 실제로 적용되어 시각 토큰이 늘어났는지 봅니다. Qwen3.8의 vision patch 크기가 3.5와 같은지를 실측으로 확인하는 자리이기도 합니다. |
+
+`lora_targets`와 `forward_backward`도 함께 보십시오. LoRA target을 language backbone에서
+찾지 못하거나 vision 경로에 LoRA가 붙으면 preflight가 FAIL로 알려 줍니다.
+
+### 예상 소요 시간
+
+A100 80GB에서 bf16으로 돌릴 때를 기준으로 잡은 값입니다.
+
+| 단계 | 예상 시간 |
+|---|---|
+| 가중치 내려받기 (54GB) | 3분에서 5분 |
+| preflight | 10분 안팎 |
+| fold 0 추론 (1,344문항) | 25분 안팎 |
+| LoRA 학습 (fold 1~4, 5,358문항) | 3시간 30분 안팎 |
+
+이 표는 80GB A100을 배정받았을 때를 전제로 합니다. 3번 절에서 설명한 것처럼 개인 계정에서
+40GB A100이나 24GB L4를 받았다면 노트북이 학습을 막으므로, 추론까지만 돌리시고 학습은 80GB를
+받은 가상 머신에서 시작하십시오.
+
+내려받기 시간은 Colab 가상 머신과 Hugging Face 사이의 회선이 빠를 때의 값입니다. 익명 요청의
+속도 제한에 걸리면 훨씬 오래 걸리므로, Colab 보안 비밀에 `HF_TOKEN`을 등록해 두시는 편이
+좋습니다. 학습 시간은 Qwen3.5 확대본의 실측값을 그대로 옮긴 어림값이므로, preflight의
+`sec_per_optimizer_step`을 보고 다시 계산하십시오. 3.8에서 가속 커널이 붙지 않으면 이 값이 두
+배 넘게 늘어날 수 있습니다.

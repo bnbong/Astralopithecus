@@ -2483,6 +2483,12 @@ out of memory가 났습니다. `vqa.jobs start` 는 job을 띄우자마자 곧�
 1,027개로 약 1.46배가 되므로 VRAM과 학습 시간이 함께 올라갑니다. 8번 절의 preflight로
 `peak_vram_gb` 와 `sec_per_optimizer_step` 을 먼저 확인한 다음에 학습을 시작하십시오.
 
+모델을 Qwen3.8-27B로 바꾸어 비교하려면 `CONFIG = QWEN38_UPSCALE_CONFIG` 라고 적으십시오.
+해상도와 LoRA 설정과 학습 하이퍼파라미터는 위의 확대본과 같고 모델만 다르므로, 두 run의
+차이를 모델 하나로 설명할 수 있습니다. 모델 식별자와 revision은 5번 절이 이 설정 파일에서
+직접 읽으므로 파라미터 셀의 `MODEL_ID` 를 따로 고칠 필요가 없습니다. 절차와 예상 시간은
+`docs/colab_personal_account.md` 의 Qwen3.8-27B 비교 실험 절에 정리해 두었습니다.
+
 `TRAIN_SCOPE` 는 학습에 쓰는 문항의 범위를 정합니다. 기본값인 `"fold0"` 은 fold 1~4의
 5,358문항만 학습하고 fold 0의 1,344문항을 검증으로 남겨 둡니다. 설정을 비교하고 학습 효과를
 판단하는 단계에서 쓰는 값입니다. `"full"` 로 바꾸면 fold 0까지 합친 6,690문항을 모두 학습하며,
@@ -2551,11 +2557,14 @@ LOCAL_MODEL_ROOT = "/content/hf_cache"               # 가상 머신 로컬 디�
 #             런타임이 회수되면 가중치가 사라지므로 접속할 때마다 다시 받아야 합니다.
 MODEL_CACHE = "auto"
 MODEL_CACHE_NEED_GB = 60.0        # 27B 원본 스냅샷은 약 54GB입니다. 여유를 포함한 값입니다.
+# Qwen3.5와 Qwen3.8을 번갈아 돌리면 캐시에 54GB짜리 스냅샷이 두 벌, 모두 약 108GB가 쌓입니다.
+# 한 벌만 두고 싶다면 다 쓴 models--Qwen--Qwen3.5-27B 폴더를 직접 지우십시오.
 
 # --- 모델과 프롬프트 ---
+# 아래 두 값은 5번 절에서 확정된 CONFIG 의 model_id 와 revision 으로 덮어씁니다. 여기 적힌
+# 값은 CONFIG 를 읽기 전에 화면에 무엇을 기대하고 있는지 보여 주는 용도입니다. 모델을 바꾸려면
+# 이 두 줄이 아니라 아래의 CONFIG 를 바꾸십시오.
 MODEL_ID = "Qwen/Qwen3.5-27B"
-# 2026-09-21 Colab A100에서 받은 스냅샷 커밋입니다. configs/colab_qwen35_27b_*.yaml 의
-# revision 과 같은 값이어야 합니다.
 MODEL_REVISION = "fc05daec18b0a78c049392ed2e771dde82bdf654"
 # 캐시에 스냅샷이 없으면 5-1절에서 먼저 내려받습니다. 추론 job이 가중치를 받는 도중에
 # 재시작되는 상황을 피하기 위해서입니다.
@@ -2565,11 +2574,15 @@ PRECISION_POLICY = "bf16"
 BF16_CONFIG = "configs/colab_qwen35_27b_bf16.yaml"
 NF4_CONFIG = "configs/colab_qwen35_27b_nf4.yaml"
 UPSCALE_CONFIG = "configs/colab_qwen35_27b_bf16_upscale.yaml"   # 작은 이미지 확대본 (min_pixels 상향)
+# Qwen3.8-27B 비교 실험용 설정입니다. 해상도와 학습 설정은 위의 확대본과 같고 모델만 다릅니다.
+QWEN38_UPSCALE_CONFIG = "configs/colab_qwen38_27b_bf16_upscale.yaml"
 CONFIG = ""                       # 비워 두면 아래 셀이 정책과 VRAM을 보고 정합니다. 직접 적으면 그 값을 씁니다.
 PROMPT_ID = "v1_image_only"       # 학습과 추론이 모두 이 프롬프트를 씁니다.
 
 # --- run-id의 기본 이름 ---
-# 실제 run-id는 여기에 프롬프트 접미사와 정밀도 접미사를 붙여서 만듭니다.
+# 실제 run-id는 여기에 프롬프트 접미사와 정밀도 접미사를 붙여서 만듭니다. 앞머리의 "colab27b"
+# 는 Qwen3.5-27B를 가리키는 이름이며, CONFIG 의 model_id 가 다른 모델이면 5번 절이 그 부분만
+# 바꿉니다. 예를 들어 Qwen3.8-27B이면 "colab38_27b_base_bf16" 이 됩니다.
 BASE_RUN_ID = "colab27b_base_bf16"
 FT_RUN_ID = "colab27b_ft_bf16"
 
@@ -2710,14 +2723,25 @@ fallback이었습니다. 설치에 실패하더라도 학습 자체는 가능하
 가중치 54GB에 peak 57GB였다는 기록도 활성값이 3GB 남짓이었다는 뜻이므로 같은 결론을 가리킵니다.
 다만 학습은 옵티마이저 상태와 역전파 활성값이 더 붙으므로 24GB에서는 허용하지 않습니다.
 
-run-id는 프롬프트와 해상도와 정밀도가 다른 결과가 한 폴더에 섞이지 않도록 다음 규칙으로
-만듭니다.
+### 모델 식별자는 설정 파일에서 읽습니다
 
+이 셀은 `MODEL_ID` 와 `MODEL_REVISION` 을 파라미터 셀의 값이 아니라 확정된 `CONFIG` 에서
+다시 읽습니다. 같은 값을 두 곳에 적어 두면 한쪽만 고쳤을 때 5-1절이 내려받는 가중치와 추론
+job이 실제로 올리는 가중치가 어긋나기 때문입니다. 설정 파일에 `revision` 이 없으면 `main` 을
+쓰되 경고를 출력합니다.
+
+run-id는 모델과 프롬프트와 해상도와 정밀도가 다른 결과가 한 폴더에 섞이지 않도록 다음
+규칙으로 만듭니다.
+
+- 기본 이름의 앞머리 `colab27b` 는 Qwen3.5-27B를 가리킵니다. `CONFIG` 의 `model_id` 가
+  Qwen3.8-27B이면 이 부분을 `colab38_27b` 로 바꿉니다. 프롬프트와 해상도가 같으면 뒤에 붙는
+  접미사가 모두 같아지므로, 앞머리를 구분하지 않으면 두 모델의 예측이 한 폴더에 섞입니다.
 - `TRAIN_SCOPE` 가 `full` 이면 학습 run-id의 기본 이름 뒤에 먼저 `_full` 을 붙입니다.
 - `PROMPT_ID` 가 `v1_image_only` 이면 프롬프트 접미사를 붙이지 않고 기본 이름을 그대로 씁니다.
 - 그 밖의 프롬프트이면 `_<PROMPT_ID>` 를 붙입니다.
-- `CONFIG` 에 확대본(`configs/colab_qwen35_27b_bf16_upscale.yaml`)을 적었으면 `_upscale` 을
-  덧붙입니다. 해상도가 다른 예측이 같은 run 폴더에 섞이지 않게 하려는 것입니다.
+- `CONFIG` 에 확대본(`configs/colab_qwen35_27b_bf16_upscale.yaml` 또는
+  `configs/colab_qwen38_27b_bf16_upscale.yaml`)을 적었으면 `_upscale` 을 덧붙입니다. 해상도가
+  다른 예측이 같은 run 폴더에 섞이지 않게 하려는 것입니다.
 - 정책이 bf16인데 VRAM이 모자라서 nf4로 내려가면 맨 뒤에 `_nf4` 를 덧붙이고 학습을 막습니다.
 
 예를 들어 `TRAIN_SCOPE` 가 `full` 이고 프롬프트가 기본값이며 bf16으로 돌아가면 학습 run-id는
@@ -2726,6 +2750,12 @@ run-id는 프롬프트와 해상도와 정밀도가 다른 결과가 한 폴더�
 내려간 원본 추론은 기본 설정에서 `colab27b_base_bf16_nf4` 가 되고, 확대본에서는
 `colab27b_base_bf16_upscale_nf4` 가 됩니다. 원본 모델의 run-id는 학습과 무관하므로 `_full` 이
 붙지 않습니다.
+
+Qwen3.8 비교 실험도 같은 규칙을 따르되 앞머리만 달라집니다. `CONFIG = QWEN38_UPSCALE_CONFIG`
+에 프롬프트를 `v2_read_text` 로 두고 `TRAIN_SCOPE` 가 `fold0` 이면 원본 추론은
+`colab38_27b_base_bf16_v2_read_text_upscale`, 학습은
+`colab38_27b_ft_bf16_v2_read_text_upscale` 이 됩니다. `TRAIN_SCOPE` 를 `full` 로 바꾸면 학습
+run-id만 `colab38_27b_ft_bf16_full_v2_read_text_upscale` 이 되고 원본 추론의 이름은 그대로입니다.
 
 확대본은 평균 시각 토큰이 1.46배가 되므로 VRAM이 70GB에 못 미치는 가상 머신에서는 정밀도를
 낮춰도 학습에는 위험합니다. 그래서 이 셀은 VRAM이 70GB 미만인데 확대본이나 bf16 설정이
@@ -2878,6 +2908,21 @@ MAX_PIXELS = int(_config_mod.get_path(_cfg_preview, "max_pixels"))
 if PRECISION_OVERRIDES:
     print("설정 파일은 그대로 두고 정밀도만 내립니다: %s" % " ".join(PRECISION_OVERRIDES))
 
+# --- 모델 식별자와 revision은 언제나 확정된 설정 파일에서 읽습니다 ---
+# 파라미터 셀에 적힌 값과 CONFIG 가 어긋나면 5-1절이 엉뚱한 가중치를 내려받고, 그 뒤의 job은
+# 설정 파일의 모델을 다시 받게 됩니다. 같은 값을 두 곳에 적어 두지 않으려고 여기에서 덮어씁니다.
+_cfg_model_id = str(_config_mod.get_path(_cfg_preview, "model_id"))
+_cfg_revision = _config_mod.get_path(_cfg_preview, "revision")
+if _cfg_model_id != MODEL_ID:
+    print("MODEL_ID 를 설정 파일의 값으로 바꿉니다: %s -> %s" % (MODEL_ID, _cfg_model_id))
+MODEL_ID = _cfg_model_id
+if _cfg_revision:
+    MODEL_REVISION = str(_cfg_revision)
+else:
+    MODEL_REVISION = "main"
+    print("경고: %s 에 revision 이 없어서 main 을 씁니다. 나중에 같은 가중치를 다시 받을 수 "
+          "없으므로, 커밋 해시를 설정 파일에 적어 두십시오." % CONFIG)
+
 # 확대본을 쓰면 run-id에 "_upscale"을 붙여서 기존 결과와 섞이지 않게 합니다.
 UPSCALE = "upscale" in Path(CONFIG).stem
 RES_SUFFIX = "_upscale" if UPSCALE else ""
@@ -2918,6 +2963,25 @@ if not Path(SPLIT_FILE).exists():
         "`python scripts/folds_to_split.py` 를 먼저 실행하십시오." % SPLIT_FILE)
 
 # --- run-id를 확정합니다 ---
+# 모델이 다르면 run 폴더 이름의 앞머리부터 달라야 합니다. 같은 프롬프트와 같은 해상도로
+# Qwen3.5와 Qwen3.8을 번갈아 돌리면 접미사가 모두 같아져서, 앞머리를 구분하지 않으면 두
+# 모델의 예측이 한 폴더에 섞이기 때문입니다. 기본 이름이 아직 Qwen3.5의 이름 그대로일
+# 때에만 바꾸므로, 파라미터 셀에서 이름을 직접 고쳤다면 그 값을 그대로 존중합니다.
+MODEL_RUN_PREFIX = _config_mod.run_id_prefix(MODEL_ID)
+if MODEL_RUN_PREFIX != _config_mod.DEFAULT_RUN_ID_PREFIX:
+    for _name in ("BASE_RUN_ID", "FT_RUN_ID"):
+        _stem = globals()[_name]
+        if _stem.startswith(MODEL_RUN_PREFIX):
+            # 이 셀만 다시 실행한 경우입니다. 앞머리가 이미 바뀌어 있으므로 아무 일도 하지 않습니다.
+            pass
+        elif _stem.startswith(_config_mod.DEFAULT_RUN_ID_PREFIX):
+            _new = MODEL_RUN_PREFIX + _stem[len(_config_mod.DEFAULT_RUN_ID_PREFIX):]
+            globals()[_name] = _new
+            print("%s 를 모델에 맞게 바꿉니다: %s -> %s" % (_name, _stem, _new))
+        else:
+            print("%s 가 %r 로 시작하지 않아 이름을 그대로 둡니다: %s"
+                  % (_name, _config_mod.DEFAULT_RUN_ID_PREFIX, _stem))
+
 PROMPT_SUFFIX = "" if PROMPT_ID == "v1_image_only" else "_" + PROMPT_ID
 
 
@@ -2978,6 +3042,7 @@ if not MIN_FREE_GB:
 
 print()
 print("GPU              : %s / VRAM %.1fGB" % (GPU_NAME, VRAM_GB))
+print("모델             : %s (revision %s)" % (MODEL_ID, MODEL_REVISION))
 print("정밀도 정책      : %s -> %s" % (PRECISION_POLICY, PRECISION))
 print("적용 중인 config : %s" % CONFIG)
 print("해상도           : min_pixels=%d, max_pixels=%d%s (시각 토큰 수는 8번 절 pixel_limits가 실측합니다)"
@@ -3017,8 +3082,14 @@ job이 재시작되면 받던 파일을 처음부터 다시 받는 일이 생깁
 `nf4` 로 돌리더라도 내려받는 파일은 같습니다. 양자화는 원본 bf16 스냅샷을 읽어서 메모리에
 올리는 시점에 수행하므로, 캐시에는 언제나 원본 크기인 약 54GB가 필요합니다.
 
-Qwen3.5는 접근 승인이 필요한 모델이 아니므로 토큰이 없어도 받을 수 있습니다. 다만 같은
-주소에서 여러 번 받으면 익명 요청의 속도 제한에 걸릴 수 있습니다. Hugging Face에서 읽기
+내려받는 모델은 5번 절이 `CONFIG` 에서 읽은 `MODEL_ID` 와 `MODEL_REVISION` 입니다. 그래서
+`CONFIG` 를 `QWEN38_UPSCALE_CONFIG` 로 바꾸면 이 절이 Qwen3.8-27B 스냅샷을 받습니다. 두 모델을
+번갈아 돌리면 캐시에 54GB짜리 스냅샷이 두 벌, 모두 약 108GB가 쌓입니다. Drive 여유가 그만큼
+없다면 파라미터 셀의 `MODEL_CACHE` 를 `"local"` 로 두어 가상 머신 로컬 디스크에 받거나, 다 쓴
+쪽의 `models--Qwen--Qwen3.5-27B` 폴더를 지우고 한 벌만 두십시오.
+
+Qwen3.5와 Qwen3.8 모두 접근 승인이 필요한 모델이 아니므로 토큰이 없어도 받을 수 있습니다.
+다만 같은 주소에서 여러 번 받으면 익명 요청의 속도 제한에 걸릴 수 있습니다. Hugging Face에서 읽기
 권한 토큰을 만들어 Colab 비밀 `HF_TOKEN` 으로 등록해 두면 이 셀이 그 값을 사용합니다.
 """))
 
@@ -3038,6 +3109,10 @@ if _hf_token:
 else:
     print("HF_TOKEN이 없어 익명으로 내려받습니다. 속도 제한 오류가 나면 토큰을 등록하십시오.")
 
+# 스냅샷 폴더 이름은 커밋 해시입니다. MODEL_REVISION 이 "main" 이면 그런 폴더가 없으므로
+# 아래 검사가 언제나 어긋나고 내려받기를 한 번 더 시도합니다. 이미 받아 둔 파일은 그대로
+# 재사용하므로 다시 받지는 않지만, 설정 파일에 커밋 해시를 적어 두는 편이 빠릅니다.
+print("내려받을 모델 :", MODEL_ID, "(revision %s)" % MODEL_REVISION)
 SNAPSHOT_DIR = (MODEL_ROOT_P / ("models--" + MODEL_ID.replace("/", "--"))
                 / "snapshots" / MODEL_REVISION)
 print("기대하는 스냅샷 위치:", SNAPSHOT_DIR)

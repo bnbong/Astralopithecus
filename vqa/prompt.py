@@ -332,11 +332,17 @@ def thinking_disabled(tail: str) -> bool:
 
     Qwen3.5 계열은 non-thinking에서 generation prompt 뒤에 빈 `<think></think>`가
     붙는다. think 태그가 아예 없는 Qwen2.5-VL 템플릿도 통과로 본다.
+
+    닫히지 않은 `<think>`로 프롬프트가 끝나면 thinking이 켜진 채로 나간 것이다. Qwen3.5와
+    Qwen3.8 모두 thinking을 켜면 generation prompt가 정확히 `<think>\\n`으로 끝나므로, 여기에서
+    `</think>`가 있는지를 먼저 보지 않으면 가장 흔한 실패를 통과로 읽게 된다.
     """
     lowered = tail.lower()
     if "<think>" not in lowered:
         return True
     head = lowered.rsplit("<think>", 1)[-1]
+    if "</think>" not in head:
+        return False
     # <think> 뒤에 곧바로 </think>가 오면 비어 있는 것이다.
     return head.split("</think>")[0].strip() == ""
 

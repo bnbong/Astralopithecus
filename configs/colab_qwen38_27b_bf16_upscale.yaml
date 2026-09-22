@@ -1,0 +1,65 @@
+# Colab Pro+ A100 80GB / transformers 5.x / Qwen3.8-27B bf16 LoRA / 작은 이미지 확대본.
+# colab_qwen35_27b_bf16_upscale.yaml 을 그대로 복사하고 model_id 와 revision 만 바꾸었다.
+#
+# 목적: 같은 해상도(min_pixels 1,048,576 / max_pixels 2,097,152)와 같은 프롬프트로 27B를
+# 3.5에서 3.8로만 갈아 끼웠을 때 fold 0 정확도가 얼마나 달라지는지 본다. 해상도, 프롬프트,
+# LoRA 설정, 학습 하이퍼파라미터를 3.5 확대본과 한 글자도 다르지 않게 두었으므로, 두 run의
+# 차이는 모델 가중치 하나로 설명할 수 있다.
+#
+# 구조: 3.8의 HF config 를 받아서 확인한 결과 architectures 는 Qwen3_5ForConditionalGeneration,
+# model_type 은 qwen3_5 이고, 64층에 linear_attention 세 층마다 full_attention 한 층이 오는
+# 배치까지 3.5와 같다. 그래서 로더와 LoRA target 탐색, fla 가속 커널을 그대로 재사용한다.
+# 다만 이 판단은 config 파일을 읽어서 내린 것이므로, 실제로 같은 경로를 타는지는 학습을
+# 시작하기 전에 preflight 로 반드시 확인해야 한다. 특히 lora_targets, kernel_fast_path,
+# chat_template_tail, label_mask, train_infer_prefix_match 다섯 가지를 보아야 한다.
+#
+# thinking: 3.8은 thinking 이 기본으로 켜져 있고 reasoning_effort 기본값이 xhigh 이다. 우리
+# 코드의 vqa/prompt.py 는 chat template 에 언제나 enable_thinking=False 를 넘기며, 3.8의
+# chat template 을 받아 3.5의 것과 직접 렌더링해 비교한 결과 이 인자를 넘기는 경로에서는
+# 두 템플릿의 출력이 바이트 단위로 같았다. 인자가 빠지면 3.8은 system 메시지 앞에 xhigh
+# 추론 지시문을 끼워 넣고 <think> 를 열어 버리는데, 그 상황은 preflight 의
+# chat_template_tail 검사가 FAIL 로 잡는다.
+#
+# 확대본을 쓰는 까닭과 비용은 colab_qwen35_27b_bf16_upscale.yaml 의 주석에 적어 두었다.
+# 요약하면 fold 0에서 남은 모델 오류 가운데 작은 글자를 잘못 읽어 틀린 13건이 모두 기존
+# 상한 아래에 있어서, 상한 대신 하한을 올려야 그 문항들의 입력이 바뀌기 때문이다. 대신
+# train 전체의 평균 시각 토큰이 702개에서 1,027개로 약 1.46배가 된다.
+#
+# 주의: 가중치 캐시에 3.5 스냅샷과 3.8 스냅샷이 각각 약 54GB씩, 모두 108GB가 쌓일 수 있다.
+# Drive 여유가 모자라면 21번 노트북의 MODEL_CACHE 를 "local" 로 두고 가상 머신 로컬 디스크에
+# 받아야 한다. VRAM 과 속도는 이 파일로 학습하기 전에 preflight 로 반드시 확인한다.
+model_id: Qwen/Qwen3.8-27B
+revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0   # 2026-09-22 HF API로 조회한 main 브랜치 커밋
+model_path: null          # 오프라인이면 로컬 스냅샷 디렉터리를 여기에 적는다
+precision: bf16
+attn_implementation: sdpa
+
+min_pixels: 1048576        # 1024 * 32 * 32
+max_pixels: 2097152        # 2048 * 32 * 32
+
+prompt_id: v1_image_only
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  targets: auto
+
+train:
+  lr: 1.0e-4
+  epochs: 1
+  micro_batch: 1
+  grad_accum: 8
+  warmup_ratio: 0.03
+  scheduler: linear
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  seed: 42
+  shuffle_options: true
+  save_every_steps: 50
+  save_every_minutes: 15
+  keep_last: 2
+
+infer:
+  batch_size: 1
+  save_every_items: 50

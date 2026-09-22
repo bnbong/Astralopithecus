@@ -21,6 +21,8 @@ EXPECTED_CONFIGS = [
     "lab_qwen35_9b.yaml",
     "colab_qwen35_27b_bf16.yaml",
     "colab_qwen35_27b_nf4.yaml",
+    "colab_qwen35_27b_bf16_upscale.yaml",
+    "colab_qwen38_27b_bf16_upscale.yaml",
 ]
 
 
@@ -185,3 +187,152 @@ def test_thinking_disabled_detection():
     assert prompt_mod.thinking_disabled("<|im_start|>assistant\n")
     assert prompt_mod.thinking_disabled("<|im_start|>assistant\n<think>\n\n</think>\n\n")
     assert not prompt_mod.thinking_disabled("<|im_start|>assistant\n<think>\n생각 중")
+    # thinking이 켜진 generation prompt는 정확히 여기에서 끝난다. 닫히지 않은 <think>를
+    # 통과로 읽으면 preflight의 chat_template_tail 검사가 가장 흔한 실패를 놓친다.
+    assert not prompt_mod.thinking_disabled("<|im_start|>assistant\n<think>\n")
+
+
+# --------------------------------------------------------------------------
+# Qwen3.8-27B 비교 실험
+# --------------------------------------------------------------------------
+
+#: 27B 확대본 두 개 사이에서 달라져도 되는 키. 나머지가 모두 같아야 두 run의 차이를
+#: 모델 하나로 설명할 수 있다.
+UPSCALE_PAIR_DIFF_KEYS = {"model_id", "revision", "_config_path"}
+
+
+def test_qwen38_upscale_config_points_at_the_new_model():
+    cfg = config_mod.load_config(CONFIG_DIR / "colab_qwen38_27b_bf16_upscale.yaml")
+    assert config_mod.get_path(cfg, "model_id") == "Qwen/Qwen3.8-27B"
+    assert config_mod.get_path(cfg, "precision") == "bf16"
+    assert config_mod.get_path(cfg, "min_pixels") == 1048576
+    assert config_mod.get_path(cfg, "max_pixels") == 2097152
+    revision = config_mod.get_path(cfg, "revision")
+    # 재현을 위해 커밋 해시로 고정한다. 조회하지 못해 null로 두었다면 이 검사가 알려 준다.
+    assert isinstance(revision, str) and len(revision) == 40, revision
+
+
+def test_qwen38_upscale_config_differs_from_qwen35_only_in_the_model():
+    qwen35 = config_mod.load_config(CONFIG_DIR / "colab_qwen35_27b_bf16_upscale.yaml")
+    qwen38 = config_mod.load_config(CONFIG_DIR / "colab_qwen38_27b_bf16_upscale.yaml")
+    differing = {key for key in set(qwen35) | set(qwen38) if qwen35.get(key) != qwen38.get(key)}
+    assert differing == UPSCALE_PAIR_DIFF_KEYS, differing
+
+
+def test_config_hash_separates_the_two_27b_upscale_runs():
+    qwen35 = config_mod.load_config(CONFIG_DIR / "colab_qwen35_27b_bf16_upscale.yaml")
+    qwen38 = config_mod.load_config(CONFIG_DIR / "colab_qwen38_27b_bf16_upscale.yaml")
+    # 해시가 같으면 --resume auto 가 3.5 checkpoint를 3.8 run에 이어 붙일 수 있다.
+    assert config_mod.config_hash(qwen35) != config_mod.config_hash(qwen38)
+
+
+@pytest.mark.parametrize(
+    "model_id, expected",
+    [
+        ("Qwen/Qwen3.5-27B", "colab27b"),
+        ("Qwen/Qwen3.8-27B", "colab38_27b"),
+        ("qwen/qwen3.8-27b", "colab38_27b"),
+        ("Qwen3.8-27B", "colab38_27b"),
+        # 표에 없는 모델은 기존 이름으로 내려간다.
+        ("Qwen/Qwen2.5-VL-3B-Instruct", "colab27b"),
+        (None, "colab27b"),
+    ],
+)
+def test_run_id_prefix_branches_on_model_id(model_id, expected):
+    assert config_mod.run_id_prefix(model_id) == expected
+
+
+def test_run_id_prefix_reads_the_shipped_configs():
+    for name, expected in (
+        ("colab_qwen35_27b_bf16_upscale.yaml", "colab27b"),
+        ("colab_qwen38_27b_bf16_upscale.yaml", "colab38_27b"),
+    ):
+        cfg = config_mod.load_config(CONFIG_DIR / name)
+        assert config_mod.run_id_prefix(config_mod.get_path(cfg, "model_id")) == expected
+
+
+# --------------------------------------------------------------------------
+# chat template의 thinking 처리
+# --------------------------------------------------------------------------
+#
+# Qwen3.8은 thinking이 기본으로 켜져 있고 reasoning_effort 기본값이 xhigh다. 아래 stub은
+# 실제 3.8 chat template에서 우리가 지나가는 부분만 옮겨 온 것이다. 2026-09-22에 3.5와 3.8의
+# chat_template.jinja를 직접 받아 렌더링해 비교했을 때, enable_thinking=False를 넘기는
+# 경로에서는 두 템플릿의 출력이 바이트 단위로 같았다. 그래서 모델별 분기를 두지 않았고,
+# 이 테스트는 apply_template이 그 인자를 실제로 넘기는지만 지킨다.
+
+_REASONING_XHIGH = "Reasoning effort is set to xhigh."
+
+
+class _StubQwen38Processor:
+    """Qwen3.8 chat template의 thinking 관련 동작만 흉내 낸다."""
+
+    def __init__(self, accepts_flag: bool = True):
+        self.accepts_flag = accepts_flag
+        self.seen_flags: list[bool | None] = []
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False,
+                            enable_thinking=None, **kwargs):
+        if enable_thinking is not None and not self.accepts_flag:
+            raise TypeError("이 템플릿은 enable_thinking을 받지 않습니다.")
+        self.seen_flags.append(enable_thinking)
+        thinking_on = enable_thinking is not False
+
+        parts = []
+        for message in messages:
+            text = "".join(
+                item.get("text", "[IMG]") for item in message["content"]
+            )
+            if message["role"] == "system" and thinking_on:
+                text = _REASONING_XHIGH + "\n\n" + text
+            if message["role"] == "assistant":
+                parts.append("<|im_start|>assistant\n<think>\n\n</think>\n\n" + text + "<|im_end|>\n")
+            else:
+                parts.append("<|im_start|>%s\n%s<|im_end|>\n" % (message["role"], text))
+        if thinking_on and not any(m["role"] == "system" for m in messages):
+            parts.insert(0, "<|im_start|>system\n" + _REASONING_XHIGH + "<|im_end|>\n")
+        if add_generation_prompt:
+            parts.append("<|im_start|>assistant\n")
+            parts.append("<think>\n" if thinking_on else "<think>\n\n</think>\n\n")
+        return "".join(parts)
+
+
+def test_apply_template_turns_qwen38_thinking_off():
+    processor = _StubQwen38Processor()
+    spec = prompt_mod.get_prompt("v1_image_only")
+    text = prompt_mod.generation_text(processor, spec, "IMG", "질문", ["가", "나", "다", "라"])
+    assert processor.seen_flags and all(flag is False for flag in processor.seen_flags)
+    # xhigh 지시문이 system 메시지 앞에 끼어들지 않아야 한다.
+    assert _REASONING_XHIGH not in text
+    assert text.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+    assert prompt_mod.thinking_disabled(text[-220:])
+
+
+def test_qwen38_thinking_stays_on_without_the_flag():
+    """인자를 넘기지 않으면 3.8은 <think>를 열어 둔다. preflight가 잡아야 하는 상태다."""
+    processor = _StubQwen38Processor()
+    spec = prompt_mod.get_prompt("v1_image_only")
+    messages = prompt_mod.build_messages(spec, "IMG", "질문", ["가", "나", "다", "라"])
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    assert _REASONING_XHIGH in text
+    assert not prompt_mod.thinking_disabled(text[-220:])
+
+
+def test_apply_template_falls_back_when_the_flag_is_rejected():
+    processor = _StubQwen38Processor(accepts_flag=False)
+    spec = prompt_mod.get_prompt("v1_image_only")
+    text = prompt_mod.generation_text(processor, spec, "IMG", "질문", ["가", "나", "다", "라"])
+    # 인자를 빼고 다시 부르므로 렌더링 자체는 성공한다. 대신 thinking이 켜진 채로 나가며,
+    # preflight의 chat_template_tail 검사가 그 상태를 FAIL로 잡는다.
+    assert prompt_mod.template_supports_thinking_flag(processor) is False
+    assert not prompt_mod.thinking_disabled(text[-220:])
+
+
+def test_training_text_reuses_the_inference_prefix_on_qwen38():
+    processor = _StubQwen38Processor()
+    spec = prompt_mod.get_prompt("v1_image_only")
+    args = (spec, "IMG", "질문", ["가", "나", "다", "라"])
+    prompt = prompt_mod.generation_text(processor, *args)
+    trained = prompt_mod.training_text(processor, *args, "c")
+    assert trained.startswith(prompt)
+    assert trained[len(prompt):] == "c" + prompt_mod.end_of_turn_suffix(processor)

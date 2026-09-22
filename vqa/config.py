@@ -237,6 +237,29 @@ def config_hash(config: Mapping[str, Any]) -> str:
     return runtime.sha256_json(hashable_view(config))
 
 
+#: 27B 계열별 run-id 기본 접두사. 27B 노트북이 model_id 를 보고 run 폴더 이름을 정할 때 쓴다.
+#: Qwen3.5는 예전 이름인 "colab27b"를 그대로 둔다. 이미 Drive에 쌓인 run 폴더와 예측 파일이
+#: 그 이름을 쓰고 있어서, 접두사를 바꾸면 이어서 실행할 수 없게 되기 때문이다.
+RUN_ID_PREFIX_BY_MODEL: dict[str, str] = {
+    "qwen3.5-27b": "colab27b",
+    "qwen3.8-27b": "colab38_27b",
+}
+
+#: model_id 가 위 표에 없을 때 쓰는 접두사.
+DEFAULT_RUN_ID_PREFIX = "colab27b"
+
+
+def run_id_prefix(model_id: str | None) -> str:
+    """model_id 를 보고 run-id 기본 이름의 접두사를 정한다.
+
+    `Qwen/Qwen3.8-27B` 처럼 조직 이름이 앞에 붙어 있어도 되고 대소문자도 가리지 않는다.
+    표에 없는 model_id 는 `DEFAULT_RUN_ID_PREFIX` 로 내려간다. 서로 다른 모델의 예측이
+    같은 run 폴더에 섞이지 않게 하려는 것이므로, 새 모델을 추가할 때에는 표에 함께 적는다.
+    """
+    name = str(model_id or "").split("/")[-1].strip().lower()
+    return RUN_ID_PREFIX_BY_MODEL.get(name, DEFAULT_RUN_ID_PREFIX)
+
+
 def model_source(config: Mapping[str, Any]) -> str:
     """from_pretrained에 넘길 경로 또는 repo id.
 
