@@ -1,0 +1,77 @@
+<mxfile host="app.diagrams.net">
+    <diagram id="pageD" name="파이프라인">
+        <mxGraphModel dx="1180" dy="540" grid="0" gridSize="10" guides="1" tooltips="1" connect="1"
+            arrows="1" fold="1" page="1" pageScale="1" pageWidth="1180" pageHeight="540" math="0"
+            shadow="0" background="#150F3A">
+            <root>
+                <mxCell id="d0" />
+                <mxCell id="d1" parent="d0" />
+                <mxCell id="s_data" value="데이터 감사·분할"
+                    style="rounded=1;arcSize=12;fillColor=#1E1750;strokeColor=#6B3FD6;strokeWidth=1.5;fontColor=#ECE9FF;fontFamily=Pretendard;fontSize=22;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="d1">
+                    <mxGeometry x="50" y="215" width="150" height="110" as="geometry" />
+                </mxCell>
+                <mxCell id="s_pre" value="preflight&#xa;15개 검사"
+                    style="rounded=1;arcSize=12;fillColor=#1E1750;strokeColor=#6B3FD6;strokeWidth=1.5;fontColor=#ECE9FF;fontFamily=Pretendard;fontSize=22;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="d1">
+                    <mxGeometry x="232" y="215" width="150" height="110" as="geometry" />
+                </mxCell>
+                <mxCell id="s_lora" value="LoRA 학습&#xa;Colab A100&#xa;fla 커널"
+                    style="rounded=1;arcSize=12;fillColor=#1E1750;strokeColor=#C9BFFF;strokeWidth=2.5;fontColor=#FFFFFF;fontStyle=1;fontFamily=Pretendard;fontSize=24;shadow=1;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="d1">
+                    <mxGeometry x="414" y="215" width="170" height="110" as="geometry" />
+                </mxCell>
+                <mxCell id="s_cache" value="추론 확률 캐시"
+                    style="rounded=1;arcSize=12;fillColor=#1E1750;strokeColor=#6B3FD6;strokeWidth=1.5;fontColor=#ECE9FF;fontFamily=Pretendard;fontSize=22;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="d1">
+                    <mxGeometry x="616" y="215" width="150" height="110" as="geometry" />
+                </mxCell>
+                <mxCell id="s_avg" value="두 모델 확률 평균"
+                    style="rounded=1;arcSize=12;fillColor=#1E1750;strokeColor=#6B3FD6;strokeWidth=1.5;fontColor=#ECE9FF;fontFamily=Pretendard;fontSize=22;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="d1">
+                    <mxGeometry x="798" y="215" width="150" height="110" as="geometry" />
+                </mxCell>
+                <mxCell id="s_submit" value="제출"
+                    style="rounded=1;arcSize=12;fillColor=#C9BFFF;strokeColor=#FFFFFF;strokeWidth=2;fontColor=#0B0824;fontStyle=1;fontFamily=Pretendard;fontSize=24;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="d1">
+                    <mxGeometry x="980" y="215" width="150" height="110" as="geometry" />
+                </mxCell>
+                <mxCell id="d_e1"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="d1" source="s_data" target="s_pre">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="d_e2"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#C9BFFF;strokeWidth=3;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="d1" source="s_pre" target="s_lora">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="d_e3"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="d1" source="s_lora" target="s_cache">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="d_e4"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="d1" source="s_cache" target="s_avg">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="d_e5"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#C9BFFF;strokeWidth=3;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="d1" source="s_avg" target="s_submit">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="d_loop" value="Drive&#xa;checkpoint&#xa;재개"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;dashed=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=1;entryDx=0;entryDy=0;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="d1" source="s_lora" target="s_lora">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="456" y="390" />
+                            <mxPoint x="541" y="390" />
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>
