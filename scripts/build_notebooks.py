@@ -227,7 +227,7 @@ CLI_ASSUMPTIONS_MD = """
 # Colab 전용. 부트스트랩보다 먼저 실행되므로 BOOT의 헬퍼를 하나도 쓰지 않는다.
 CODE_FETCH = r'''
 # --- 코드 가져오기 (부트스트랩보다 먼저 실행합니다. BOOT의 헬퍼를 쓰지 않습니다.) ---
-import os, re, shutil, subprocess, zipfile
+import os, re, shutil, subprocess, sys, zipfile
 from pathlib import Path
 
 _code_root = Path(PROJECT_ROOT).expanduser()
@@ -280,14 +280,28 @@ def _flatten_single_top_dir(target):
 CODE_VERSION = None
 
 if (_code_root / ".git").exists():
-    rc, out = _git(["-C", str(_code_root), "pull", "--ff-only"], check=False)
+    # 원격 URL에는 토큰이 없어 비공개 저장소에서는 pull이 항상 인증 오류로 실패하므로,
+    # clone 때와 같은 토큰 URL로 fetch 한 뒤 reset --hard로 갱신합니다.
+    _token = _read_github_token()
+    _fetch_url = REPO_URL
+    if _token:
+        _fetch_url = REPO_URL.replace("https://", "https://x-access-token:%s@" % _token, 1)
+    _, _stash_out = _git(["-C", str(_code_root), "stash", "--include-untracked",
+                          "-m", "colab-auto-stash"], secret=_token, check=False)
+    print("로컬 변경을 임시로 치워 두었습니다:" if "no local changes" not in _stash_out.lower()
+          else "치울 로컬 변경이 없습니다.")
+    print(_stash_out.strip()[:600])
+    rc, out = _git(["-C", str(_code_root), "fetch", _fetch_url, REPO_BRANCH],
+                   secret=_token, check=False)
     if rc == 0:
+        _git(["-C", str(_code_root), "reset", "--hard", "FETCH_HEAD"], check=False)
         print("코드를 최신 상태로 갱신했습니다.")
     else:
-        print("git pull이 실패했습니다. 이미 받아 둔 코드를 그대로 사용하고 계속 진행합니다.")
+        print("git fetch가 실패했습니다. 이미 받아 둔 코드를 그대로 사용하고 계속 진행합니다.")
         print(out.strip()[:600])
     _, _head = _git(["-C", str(_code_root), "rev-parse", "HEAD"], check=False)
     CODE_VERSION = _head.strip()
+    del _token, _fetch_url
 else:
     _token = _read_github_token()
     if _token:
@@ -326,6 +340,13 @@ if not (_code_root / "vqa").is_dir():
 
 print("코드 위치 :", _code_root)
 print("코드 버전 :", CODE_VERSION)
+
+# 커널에 옛 vqa 모듈이 캐시돼 있으면 방금 받은 코드가 반영되지 않으므로 비웁니다.
+_stale_modules = [_name for _name in sys.modules if _name == "vqa" or _name.startswith("vqa.")]
+for _name in _stale_modules:
+    del sys.modules[_name]
+if _stale_modules:
+    print("커널에 남아 있던 vqa 모듈 캐시를 비웠습니다 (%d개)." % len(_stale_modules))
 '''
 
 # 부트스트랩 직후에 실행합니다. CODE_VERSION과 RUN_ROOT_P가 모두 준비된 뒤여야 합니다.
@@ -1945,8 +1966,8 @@ print("Drive를 연결했습니다.")
 2. 토큰을 쓰기 어려운 상황이라면 코드 전체를 zip으로 묶어 Drive에 올리고, 파라미터 셀의
    `CODE_ZIP` 에 그 경로를 적습니다. 압축 안에 최상위 폴더가 하나만 있어도 알아서 펼칩니다.
 
-이미 코드를 받아 둔 상태라면 `git pull --ff-only` 로 갱신만 합니다. 갱신이 실패하더라도 멈추지
-않고 기존 코드를 그대로 사용합니다.
+이미 코드를 받아 둔 상태라면 로컬 변경을 stash로 치운 뒤 fetch와 reset --hard로 갱신하며, 갱신이
+실패하더라도 멈추지 않고 기존 코드를 그대로 사용합니다.
 """))
 
     cells.append(code(CODE_FETCH))
