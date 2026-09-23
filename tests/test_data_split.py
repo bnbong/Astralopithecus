@@ -442,7 +442,11 @@ def write_fold_files(
 
 
 def run_folds_to_split(
-    fold_dir: Path, data_root: Path, out_dir: Path, scope: str | None = None
+    fold_dir: Path,
+    data_root: Path,
+    out_dir: Path,
+    scope: str | None = None,
+    extra: list[str] | None = None,
 ) -> int:
     import sys as _sys
 
@@ -460,10 +464,19 @@ def run_folds_to_split(
     ]
     if scope is not None:
         _sys.argv += ["--scope", scope]
+    _sys.argv += list(extra or [])
     try:
         return folds_cli.main()
     finally:
         _sys.argv = argv
+
+
+def write_folds_csv(path: Path, assignment: dict[str, int]) -> Path:
+    """id,fold 두 열짜리 전체 배정 파일을 만든다."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["id,fold"] + [f"{row_id},{fold}" for row_id, fold in sorted(assignment.items())]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
 
 
 def test_folds_to_split_writes_the_schema_train_py_reads(tmp_path: Path) -> None:
@@ -663,3 +676,205 @@ def test_previous_full_split_is_preserved_for_the_running_colab_run() -> None:
         legacy["content_sha256"]
         == "d394c8369c8dff020eea12e5d2d6cc00a7b4eaf97d1cb6f411d2e04a8ac4db01"
     )
+
+
+# --------------------------------------------------------------------------- #
+# --scope fold: fold N을 검증으로 하는 분할
+# --------------------------------------------------------------------------- #
+def make_assignment(n_per_fold: int = 6, n_folds: int = 5) -> dict[str, int]:
+    """id -> fold. id는 fold 번호와 무관하게 이름만 보고 섞이지 않도록 붙인다."""
+    assignment: dict[str, int] = {}
+    index = 0
+    for fold in range(n_folds):
+        for _ in range(n_per_fold):
+            index += 1
+            assignment[f"train_{index:04d}.jpg"] = fold
+    return assignment
+
+
+def test_fold_scope_needs_a_fold_assignment_file(tmp_path: Path) -> None:
+    """배정 파일이 없으면 무엇을 받아야 하는지 알려 주고 멈춘다."""
+    fold_dir = write_fold_files(tmp_path, ["train_0001.jpg"], ["train_0002.jpg"])
+    with pytest.raises(SystemExit) as caught:
+        run_folds_to_split(
+            fold_dir, tmp_path, tmp_path / "out", scope="fold", extra=["--val-fold", "2"]
+        )
+    message = str(caught.value)
+    assert "id,fold" in message
+    # 찾아본 자리와 받아야 할 파일 이름을 둘 다 알려 준다.
+    assert "train_folds.csv" in message
+    assert "folds_all.csv" in message
+
+
+def test_fold_scope_needs_a_val_fold_number(tmp_path: Path) -> None:
+    fold_dir = write_fold_files(tmp_path, ["train_0001.jpg"], ["train_0002.jpg"])
+    with pytest.raises(SystemExit, match="--val-fold"):
+        run_folds_to_split(fold_dir, tmp_path, tmp_path / "out", scope="fold")
+
+
+def test_fold_scope_rejects_a_fold_number_outside_the_range(tmp_path: Path) -> None:
+    fold_dir = write_fold_files(tmp_path, ["train_0001.jpg"], ["train_0002.jpg"])
+    with pytest.raises(SystemExit, match="0~4"):
+        run_folds_to_split(
+            fold_dir, tmp_path, tmp_path / "out", scope="fold", extra=["--val-fold", "5"]
+        )
+
+
+def test_fold_scope_splits_on_the_chosen_fold(tmp_path: Path) -> None:
+    """fold N만 검증으로 가고 나머지 네 fold가 학습이 된다."""
+    import json
+
+    assignment = make_assignment()
+    fold_dir = write_fold_files(tmp_path, ["train_0001.jpg"], ["train_0007.jpg"], exclude_ids=[])
+    folds_csv = write_folds_csv(tmp_path / "folds_all.csv", assignment)
+    out_dir = tmp_path / "out"
+
+    assert (
+        run_folds_to_split(
+            fold_dir,
+            tmp_path,
+            out_dir,
+            scope="fold",
+            extra=["--val-fold", "2", "--folds-csv", str(folds_csv)],
+        )
+        == 0
+    )
+    payload = json.loads((out_dir / "split_fold2.json").read_text(encoding="utf-8"))
+    assert payload["version"] == "fold2"
+    assert payload["val_fold"] == 2
+    expected_val = sorted(i for i, fold in assignment.items() if fold == 2)
+    assert payload["val_ids"] == expected_val
+    assert payload["n_val"] == 6
+    assert payload["n_train"] == 24
+    assert not set(payload["train_ids"]) & set(payload["val_ids"])
+    assert payload["excluded_overlap_test"] == 0
+    # 검증 id 목록도 함께 남는다.
+    ids = (out_dir / "val_fold2_ids.txt").read_text(encoding="utf-8").split()
+    assert ids == expected_val
+
+
+def test_fold_scope_excludes_test_overlap_from_training_only(tmp_path: Path) -> None:
+    """test 중복 문항은 학습에서만 빠지고 검증에는 남는다. fold 0 분할과 같은 규칙이다."""
+    import json
+
+    assignment = make_assignment()
+    # 검증이 될 fold 2에서 하나, 학습이 될 fold 4에서 둘을 제외 목록에 넣는다.
+    in_val = sorted(i for i, fold in assignment.items() if fold == 2)[0]
+    in_train = sorted(i for i, fold in assignment.items() if fold == 4)[:2]
+    fold_dir = write_fold_files(
+        tmp_path,
+        ["train_0001.jpg"],
+        ["train_0007.jpg"],
+        exclude_ids=[in_val, *in_train],
+    )
+    folds_csv = write_folds_csv(tmp_path / "folds_all.csv", assignment)
+    out_dir = tmp_path / "out"
+
+    assert (
+        run_folds_to_split(
+            fold_dir,
+            tmp_path,
+            out_dir,
+            scope="fold",
+            extra=["--val-fold", "2", "--folds-csv", str(folds_csv)],
+        )
+        == 0
+    )
+    payload = json.loads((out_dir / "split_fold2.json").read_text(encoding="utf-8"))
+    assert payload["excluded_overlap_test"] == 2
+    assert payload["excluded_overlap_test_ids"] == sorted(in_train)
+    assert payload["n_train"] == 22
+    # 검증 목록은 그대로다.
+    assert in_val in payload["val_ids"]
+    assert payload["n_val"] == 6
+    for row_id in in_train:
+        assert row_id not in payload["train_ids"]
+
+
+def test_fold_scope_refuses_an_incomplete_assignment(tmp_path: Path) -> None:
+    assignment = {row_id: fold for row_id, fold in make_assignment().items() if fold != 4}
+    fold_dir = write_fold_files(tmp_path, ["train_0001.jpg"], ["train_0007.jpg"], exclude_ids=[])
+    folds_csv = write_folds_csv(tmp_path / "folds_all.csv", assignment)
+    with pytest.raises(SystemExit, match="모두 채우지 않습니다"):
+        run_folds_to_split(
+            fold_dir,
+            tmp_path,
+            tmp_path / "out",
+            scope="fold",
+            extra=["--val-fold", "2", "--folds-csv", str(folds_csv)],
+        )
+
+
+def test_fold_scope_never_rewrites_an_existing_split_with_the_same_ids(tmp_path: Path) -> None:
+    """이미 있는 분할과 내용이 같으면 파일을 건드리지 않는다.
+
+    저장소에 들어 있는 split_fold0.json 을 지키기 위한 규칙이다. 내용이 같아도 다시 쓰면
+    created 줄 때문에 diff가 남는다.
+    """
+    assignment = make_assignment()
+    fold_dir = write_fold_files(tmp_path, ["train_0001.jpg"], ["train_0007.jpg"], exclude_ids=[])
+    folds_csv = write_folds_csv(tmp_path / "folds_all.csv", assignment)
+    out_dir = tmp_path / "out"
+    args = ["--val-fold", "1", "--folds-csv", str(folds_csv)]
+
+    assert run_folds_to_split(fold_dir, tmp_path, out_dir, scope="fold", extra=args) == 0
+    written = out_dir / "split_fold1.json"
+    before = written.read_bytes()
+    assert run_folds_to_split(fold_dir, tmp_path, out_dir, scope="fold", extra=args) == 0
+    assert written.read_bytes() == before
+
+
+def test_fold_scope_refuses_to_overwrite_a_split_with_different_ids(tmp_path: Path) -> None:
+    assignment = make_assignment()
+    fold_dir = write_fold_files(tmp_path, ["train_0001.jpg"], ["train_0007.jpg"], exclude_ids=[])
+    out_dir = tmp_path / "out"
+    folds_csv = write_folds_csv(tmp_path / "folds_all.csv", assignment)
+    args = ["--val-fold", "1", "--folds-csv", str(folds_csv)]
+    assert run_folds_to_split(fold_dir, tmp_path, out_dir, scope="fold", extra=args) == 0
+
+    # 배정을 뒤섞어서 같은 fold 번호에 다른 문항이 들어가게 만든다.
+    shuffled = {row_id: (fold + 1) % 5 for row_id, fold in assignment.items()}
+    write_folds_csv(folds_csv, shuffled)
+    with pytest.raises(SystemExit, match="id 목록이 다릅니다"):
+        run_folds_to_split(fold_dir, tmp_path, out_dir, scope="fold", extra=args)
+
+
+def test_committed_fold0_split_is_reproducible_from_a_fold_assignment(tmp_path: Path) -> None:
+    """저장소의 fold CSV로 전체 배정을 만들면 split_fold0.json 의 id 목록이 그대로 나온다.
+
+    --scope fold 가 팀 공식 fold 0 분할과 같은 규칙으로 도는지 확인한다. 학습에서만 test
+    중복을 빼고 검증은 그대로 두는 규칙이 맞아야 두 목록이 일치한다.
+    """
+    import json
+
+    repo = Path(__file__).resolve().parents[1]
+    split_path = repo / "artifacts" / "data" / "split_fold0.json"
+    val_path = repo / "fold_csv_files" / "val_fold0.csv"
+    all_path = repo / "fold_csv_files" / "train_fold1234_all.csv"
+    if not (split_path.exists() and val_path.exists() and all_path.exists()):
+        pytest.skip("저장소의 fold CSV 가 없습니다.")
+
+    pd = pytest.importorskip("pandas")
+    frames = pd.read_csv(val_path, dtype="string")["id"].tolist()
+    rest = pd.read_csv(all_path, dtype="string")["id"].tolist()
+    assignment = {str(row_id).strip(): 0 for row_id in frames}
+    for index, row_id in enumerate(rest):
+        assignment[str(row_id).strip()] = 1 + index % 4
+
+    folds_csv = write_folds_csv(tmp_path / "folds_all.csv", assignment)
+    out_dir = tmp_path / "out"
+    assert (
+        run_folds_to_split(
+            repo / "fold_csv_files",
+            tmp_path,
+            out_dir,
+            scope="fold",
+            extra=["--val-fold", "0", "--folds-csv", str(folds_csv)],
+        )
+        == 0
+    )
+    made = json.loads((out_dir / "split_fold0.json").read_text(encoding="utf-8"))
+    committed = json.loads(split_path.read_text(encoding="utf-8"))
+    assert made["train_ids"] == committed["train_ids"]
+    assert made["val_ids"] == committed["val_ids"]
+    assert made["excluded_overlap_test"] == 12

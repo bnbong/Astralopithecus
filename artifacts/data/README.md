@@ -22,3 +22,16 @@ fold 1~4의 5,358문항과 fold 0의 1,344문항을 합친 다음,
 `audit_report.*`와 `image_hashes.csv`, `near_duplicate_pairs.csv`, `split_leakage.csv`는
 데이터에서 파생된 산출물이라서 저장소에 추적하지 않습니다. 필요하면
 `scripts/audit_data.py`를 다시 실행해서 만드십시오.
+
+`train_folds.csv`는 train 6,714문항 전체의 fold 번호와 test 중복 여부를 담은 표입니다. 열은
+`id`, `fold`(0~4), `overlap_test`(불리언) 세 개뿐이고 질문과 정답은 넣지 않았습니다. 팀원이
+배포한 `extract_split_csvs.py`의 `build()` 로직을 그대로 재현해서 만들었습니다. train, dev,
+test 이미지 파일 바이트의 MD5를 그룹 키로 삼고, answer를 층화 기준으로
+`StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)`를 적용한 결과입니다.
+재현 명령은 이미지 폴더에서 `path, md5` 열을 가진 해시 CSV를 먼저 만든 다음
+`python extract_split_csvs.py --data-dir <원본 데이터 폴더> --hash-csv <해시 csv> --out-dir
+<출력 폴더> --verify fold_csv_files`를 실행하는 순서입니다. pandas 3.0.2와 scikit-learn
+1.8.0, pandas 3.0.6과 scikit-learn 1.9.1 두 조합 모두에서 `fold_csv_files`의 다섯 파일과
+내용이 같았습니다. 저장소의 원본 파일은 줄바꿈이 CRLF라서 줄바꿈만 맞추면 바이트까지
+동일합니다. fold별 문항 수는 0번 1,344문항, 1번과 2번이 각각 1,343문항, 3번과 4번이 각각
+1,342문항이고 `overlap_test`가 참인 문항은 24건입니다.

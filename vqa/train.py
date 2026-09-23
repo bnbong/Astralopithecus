@@ -19,7 +19,7 @@ import os
 import signal
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
@@ -113,6 +113,58 @@ def build_scheduler(optimizer: Any, name: str, warmup_steps: int, total_steps: i
 
 
 # --------------------------------------------------------------------------
+# 4지 제한 손실
+# --------------------------------------------------------------------------
+
+
+def choice4_loss(logits: Any, labels: Any, choice_ids: Sequence[int]) -> Any:
+    """감독 위치의 logits에서 a/b/c/d 네 개만 뽑아 4-way cross entropy를 만든다.
+
+    collator가 표본마다 정답 letter 토큰 한 자리에만 label을 넣으므로, 감독 위치는
+    `labels != -100` 인 자리 하나다. 그 토큰을 예측하는 logits은 한 칸 앞에 있다.
+    전체 vocab에 대한 CE와 달리 오답 letter 세 개와만 경쟁하므로, 모델이 letter가 아닌
+    토큰을 눌러야 할 까닭이 사라진다.
+
+    vocab 전체를 softmax하지 않고 4개만 골라 쓰므로 추론의 scoring과 같은 비교를 학습에서
+    그대로 한다. 수치가 흔들리지 않도록 float32로 올려서 계산한다.
+    """
+    import torch
+
+    if labels.dim() != 2:
+        raise ValueError(f"labels는 (batch, seq) 모양이어야 합니다: {tuple(labels.shape)}")
+    if logits.dim() != 3:
+        raise ValueError(f"logits는 (batch, seq, vocab) 모양이어야 합니다: {tuple(logits.shape)}")
+    ids = [int(i) for i in choice_ids]
+    if len(ids) != 4:
+        raise ValueError(f"choice_ids는 a/b/c/d 네 개여야 합니다: {ids}")
+    if len(set(ids)) != 4:
+        raise ValueError(f"choice_ids가 서로 다르지 않습니다: {ids}")
+
+    supervised = labels != -100
+    counts = supervised.sum(dim=1)
+    if not bool((counts == 1).all()):
+        raise ValueError(f"표본당 감독 토큰이 1개가 아닙니다: {counts.tolist()}")
+    positions = torch.argmax(supervised.to(torch.int32), dim=1)
+    if not bool((positions > 0).all()):
+        raise ValueError("감독 위치가 sequence 맨 앞입니다. 그 토큰을 예측하는 logits이 없습니다.")
+
+    rows = torch.arange(labels.shape[0], device=logits.device)
+    choice = torch.as_tensor(ids, device=logits.device, dtype=torch.long)
+    # 한 칸 앞의 logits이 감독 위치의 토큰을 예측한다. 모델 내부 CE와 같은 정렬이다.
+    picked = logits[rows, positions.to(logits.device) - 1, :].index_select(1, choice)
+
+    gold = labels[rows.to(labels.device), positions]
+    match = gold.to(choice.device).unsqueeze(1) == choice.unsqueeze(0)
+    if not bool(match.any(dim=1).all()):
+        raise ValueError(
+            "감독 토큰이 a/b/c/d 토큰 id 안에 없습니다. collator와 scoring이 다른 토큰을 "
+            f"보고 있습니다: labels={gold.tolist()} choice_ids={ids}"
+        )
+    target = torch.argmax(match.to(torch.int32), dim=1)
+    return torch.nn.functional.cross_entropy(picked.float(), target)
+
+
+# --------------------------------------------------------------------------
 # 중단 신호
 # --------------------------------------------------------------------------
 
@@ -172,6 +224,8 @@ class TrainOutcome:
     scheduler: Any = None
     #: save_final=True로 끝났을 때 저장된 final_adapter 경로.
     final_adapter: Path | None = None
+    #: train.keep_epoch_adapters가 켜져 있을 때 이번 실행이 저장한 epoch adapter 경로들.
+    epoch_adapters: list[Path] = dataclass_field(default_factory=list)
 
 
 def run_training(
@@ -204,6 +258,9 @@ def run_training(
     save_every_steps = int(train_cfg.get("save_every_steps", 50) or 0)
     save_every_minutes = float(train_cfg.get("save_every_minutes", 15) or 0)
     keep_last = int(train_cfg.get("keep_last", 2))
+    # 설정 파일에 적어 두었을 때에만 켜지는 키다. DEFAULTS에 없으므로 기존 run의 config_hash는
+    # 그대로다. epoch이 하나뿐이면 final_adapter와 같은 값이라 저장할 까닭이 없다.
+    keep_epoch_adapters = bool(train_cfg.get("keep_epoch_adapters", False)) and epochs >= 2
     heartbeat_every = max(int(train_cfg.get("heartbeat_every_steps", 5) or 1), 1)
     log_every = max(int(train_cfg.get("log_every_steps", 1) or 1), 1)
 
@@ -258,6 +315,11 @@ def run_training(
             state.config_hash = config_hash
             state.split_hash = split_hash
             state.total_steps = total_steps
+            # epoch 경계 표시는 그 checkpoint를 설명하는 값이지 지금 상태를 설명하는 값이
+            # 아니다. 지우지 않으면 재개 뒤에 저장하는 checkpoint마다 표시가 따라붙어서
+            # 정리 단계가 아무것도 지우지 못한다.
+            if isinstance(state.extra, dict):
+                state.extra.pop(ckpt_mod.EPOCH_BOUNDARY_KEY, None)
             resumed_from = target
             print(
                 f"[train] 재개: {target.name} epoch={state.epoch} step={state.global_step} "
@@ -274,6 +336,7 @@ def run_training(
     heartbeat_path = run_dir / "heartbeat.json"
     last_save_time = time.time()
     last_checkpoint: Path | None = resumed_from
+    epoch_adapters: list[Path] = []
     steps_done = 0
     step_times: list[float] = []
     runtime.reset_peak_vram()
@@ -281,11 +344,17 @@ def run_training(
     def current_rng() -> dict[str, Any]:
         return runtime.rng_state()
 
-    def do_save(reason: str) -> Path:
+    def do_save(reason: str, *, extra_state: dict[str, Any] | None = None) -> Path:
         nonlocal last_save_time, last_checkpoint
         # 같은 step의 완결 checkpoint가 이미 있으면 다시 쓰지 않는다.
         # (덮어쓰는 동안 잠깐 그 checkpoint가 사라지는 창을 만들지 않기 위해서다.)
-        if last_checkpoint is not None and ckpt_mod.parse_step(last_checkpoint) == state.global_step:
+        # extra_state를 남겨야 하는 저장은 예외다. 같은 step이라도 표시가 들어간 state를
+        # 새로 써야 정리 단계가 그 checkpoint를 epoch 경계로 알아볼 수 있다.
+        if (
+            extra_state is None
+            and last_checkpoint is not None
+            and ckpt_mod.parse_step(last_checkpoint) == state.global_step
+        ):
             already, _ = ckpt_mod.verify_checkpoint(last_checkpoint)
             if already:
                 print(f"[train] checkpoint 생략 ({reason}): step {state.global_step}은 이미 저장됨", flush=True)
@@ -299,6 +368,7 @@ def run_training(
             scheduler=scheduler,
             keep_last=keep_last,
             rng=current_rng(),
+            extra_state=extra_state,
         )
         last_save_time = time.time()
         last_checkpoint = path
@@ -417,15 +487,52 @@ def run_training(
                 if due_steps or due_time:
                     do_save("steps" if due_steps else "minutes")
 
+                if keep_epoch_adapters and at_epoch_end:
+                    # 순서가 중요하다. adapter를 먼저 쓰고 표시가 붙은 checkpoint를 나중에 쓴다.
+                    # 그래야 둘 사이에서 죽었을 때 재개가 이 epoch의 마지막 step을 다시 밟아서
+                    # adapter를 다시 쓴다.
+                    finished_epoch = epoch + 1
+                    saved = ckpt_mod.save_epoch_adapter(
+                        run_dir=run_dir,
+                        scratch_dir=scratch_dir,
+                        adapter_saver=backend.save_adapter,
+                        state=state,
+                        epoch=finished_epoch,
+                    )
+                    epoch_adapters.append(saved)
+                    print(f"[train] epoch {finished_epoch} adapter: {saved}", flush=True)
+                    do_save(
+                        f"epoch_end:{finished_epoch}",
+                        extra_state={ckpt_mod.EPOCH_BOUNDARY_KEY: finished_epoch},
+                    )
+
                 if stop.requested:
                     do_save(f"signal:{stop.signal_name}")
                     write_heartbeat(seconds_per_step)
-                    return TrainOutcome(state, False, f"stopped:{stop.signal_name}", last_checkpoint, steps_done, optimizer, scheduler)
+                    return TrainOutcome(
+                        state,
+                        False,
+                        f"stopped:{stop.signal_name}",
+                        last_checkpoint,
+                        steps_done,
+                        optimizer,
+                        scheduler,
+                        epoch_adapters=epoch_adapters,
+                    )
 
                 if max_steps is not None and state.global_step >= max_steps:
                     do_save("max_steps")
                     write_heartbeat(seconds_per_step)
-                    return TrainOutcome(state, False, "max_steps", last_checkpoint, steps_done, optimizer, scheduler)
+                    return TrainOutcome(
+                        state,
+                        False,
+                        "max_steps",
+                        last_checkpoint,
+                        steps_done,
+                        optimizer,
+                        scheduler,
+                        epoch_adapters=epoch_adapters,
+                    )
 
             state.epoch = epoch + 1
             state.samples_consumed_in_epoch = 0
@@ -433,7 +540,16 @@ def run_training(
     except KeyboardInterrupt:
         do_save("KeyboardInterrupt")
         write_heartbeat(None)
-        return TrainOutcome(state, False, "KeyboardInterrupt", last_checkpoint, steps_done, optimizer, scheduler)
+        return TrainOutcome(
+            state,
+            False,
+            "KeyboardInterrupt",
+            last_checkpoint,
+            steps_done,
+            optimizer,
+            scheduler,
+            epoch_adapters=epoch_adapters,
+        )
     finally:
         if stop_flag is None:
             stop.restore()
@@ -451,7 +567,15 @@ def run_training(
         )
     write_heartbeat(sum(step_times) / len(step_times) if step_times else None)
     return TrainOutcome(
-        state, finished, reason, last_checkpoint, steps_done, optimizer, scheduler, final_adapter
+        state,
+        finished,
+        reason,
+        last_checkpoint,
+        steps_done,
+        optimizer,
+        scheduler,
+        final_adapter,
+        epoch_adapters,
     )
 
 
@@ -474,6 +598,8 @@ class VLMBackend:
     spec: Any = None
     targets: Any = None
     device: str = "cpu"
+    #: "full_vocab"(기본) 또는 "choice4". build()에서 설정을 보고 정한다.
+    loss_mode: str = config_mod.DEFAULT_LOSS_MODE
 
     def build(self) -> "VLMBackend":
         import torch
@@ -483,6 +609,12 @@ class VLMBackend:
         from . import prompt as prompt_mod
 
         self.spec = prompt_mod.get_prompt(str(config_mod.get_path(self.cfg, "prompt_id")))
+        self.loss_mode = str(
+            config_mod.get_path(self.cfg, "train.loss", config_mod.DEFAULT_LOSS_MODE)
+            or config_mod.DEFAULT_LOSS_MODE
+        )
+        if self.loss_mode not in config_mod.LOSS_MODES:
+            raise ValueError(f"train.loss를 알 수 없습니다: {self.loss_mode!r}")
         self.processor = modeling.load_processor(self.cfg)
         base, loader_name = modeling.load_base_model(self.cfg, for_training=True)
         self.model, self.targets = modeling.build_lora_model(base, self.cfg)
@@ -530,11 +662,18 @@ class VLMBackend:
         import torch
 
         moved = {k: (v.to(self.device, non_blocking=True) if torch.is_tensor(v) else v) for k, v in batch.items()}
+        choice4_labels = None
+        if self.loss_mode == "choice4":
+            # labels를 빼고 forward한다. 손실을 감독 위치의 4개 logits에서 직접 만들 것이므로
+            # 모델에게 vocab 15만 개짜리 CE를 한 번 더 시킬 까닭이 없다.
+            choice4_labels = moved.pop("labels")
         if self.device == "cuda":
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 out = self.model(**moved, use_cache=False)
         else:
             out = self.model(**moved, use_cache=False)
+        if choice4_labels is not None:
+            return choice4_loss(out.logits, choice4_labels, self.choice_tokens.ids)
         return out.loss
 
     def trainable_parameters(self) -> list[Any]:
@@ -638,6 +777,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "loader_class": getattr(backend, "loader_name", None),
         "prompt_id": config_mod.get_path(cfg, "prompt_id"),
         "prompt_hash": backend.spec.hash(),
+        # 손실 방식과 그때 쓴 a/b/c/d 토큰 id를 함께 남긴다. choice4 로 학습한 run 인지
+        # 나중에 manifest 만 보고 알 수 있어야 하기 때문이다.
+        "loss": backend.loss_mode,
         "choice_tokens": backend.choice_tokens.as_dict(),
         "lora_targets": backend.targets.as_dict(),
         "parameters": _count_params(backend.model),
@@ -669,6 +811,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ckpt_mod.ResumeRefused as exc:
         print(f"[train] 재개 거부: {exc}")
         return 2
+
+    saved_epoch_adapters = ckpt_mod.list_epoch_adapters(run_dir)
+    if saved_epoch_adapters:
+        manifest["epoch_adapters"] = [str(path) for path in saved_epoch_adapters]
+        runtime.atomic_write_json(run_dir / "run_manifest.json", manifest)
+        for path in saved_epoch_adapters:
+            print(f"[train] epoch adapter: {path}")
 
     if outcome.final_adapter is not None:
         processor_dir = ckpt_mod.final_processor_dir(run_dir)

@@ -2525,6 +2525,35 @@ zero-shot 추론만 검증했으므로 학습 절은 건너뛰고 9번 절의 �
 데이터로 학습한 모델은 fold 0 문항도 학습에 썼으므로, 그 정확도가 일반화 성능을 나타내지 않기
 때문입니다. 17번 절의 test 추론과 제출 파일 생성은 두 경우 모두 그대로 동작합니다.
 
+`VAL_FOLD` 는 `TRAIN_SCOPE` 가 `"fold0"` 일 때 다섯 fold 가운데 어느 것을 검증으로 쓸지
+정합니다. 기본값 0은 지금까지 돌린 run들과 똑같이 팀 공식 fold 0 분할을 씁니다. 1~4로 바꾸면
+5번 절이 `artifacts/data/split_fold{N}.json` 을 학습 분할로 쓰고, 그 파일의 `val_ids` 를 꺼내
+`artifacts/data/val_fold{N}_ids.csv` 를 만들어 검증 id로 씁니다. run-id 뒤에는 `_fold{N}` 이
+붙어서 fold 0 run과 섞이지 않습니다. 분할 파일은 먼저 만들어 두어야 합니다.
+
+    python scripts/folds_to_split.py --scope fold --val-fold 2
+
+이 명령에는 문항마다 fold 번호가 적힌 CSV 하나가 필요합니다. 저장소에 있는 fold CSV에는 fold 0
+목록과 fold 1~4를 합친 목록만 있어서 1~4를 따로 가를 수 없기 때문입니다. 지금은
+`artifacts/data/train_folds.csv` 가 그 자리를 채우고 있어서 인자를 적지 않아도 찾습니다. 다른
+파일을 쓰려면 `--folds-csv` 로 넘기십시오. 파일이 하나도 없으면 명령이 무엇을 요청해야 하는지
+안내하고 멈춥니다. fold를 바꾸어 여러 번 학습하면 같은 설정의 정확도를
+fold 다섯 개로 재게 되므로, fold 0 한 번으로는 가려지지 않던 1퍼센트포인트 안쪽의 차이를 볼 수
+있습니다.
+
+`EPOCH_ADAPTER` 는 여러 epoch을 돌린 run에서 중간 epoch의 adapter로 추론하고 싶을 때 적습니다.
+설정 파일에 `train.keep_epoch_adapters: true` 를 적고 `train.epochs` 를 2 이상으로 두면, 학습이
+각 epoch의 마지막 step에서 그때의 adapter를 `epoch_adapters/epoch_{n}/` 에 따로 남깁니다.
+`EPOCH_ADAPTER = "2"` 라고 적으면 15번 절과 17번 절이 그 디렉터리를 `--adapter` 로 넘기고,
+결과 파일 이름 뒤에 `_epoch2` 가 붙습니다. `ADAPTER_RUN_ID` 와 함께 적으면 그 run의 epoch
+adapter를 빌려 옵니다. epoch을 2로 올렸을 때 실제로 좋아지는지, 아니면 2 epoch째에 과적합이
+시작되는지를 학습을 다시 하지 않고 확인할 수 있습니다.
+
+모델을 Qwen3-VL-32B-Instruct로 바꾸어 비교하려면 `CONFIG = QWEN3VL_CONFIG` 라고 적고
+`PROMPT_ID` 를 `"v2_read_text"` 로 두십시오. 가중치가 66GB여서 80GB A100에서 bf16 추론은
+들어가지만, 5번 절이 학습 하한을 86GB로 잡으므로 그 가상 머신에서는 학습을 막고 추론만
+허용합니다. 이 설정은 zero-shot 추론으로 다른 계통의 확률을 얻는 데 쓰십시오.
+
 `MODEL_CACHE` 는 27B 가중치를 어디에 둘지 정합니다. 기본값인 `"auto"` 는 20번 노트북이 남긴
 캐시를 먼저 찾고, 없으면 Drive 여유가 `MODEL_CACHE_NEED_GB` 이상일 때에만 Drive를 씁니다.
 개인 계정처럼 Drive 용량이 부족한 상황이라면 `"local"` 로 적어서 가상 머신의 로컬 디스크에
@@ -2612,6 +2641,11 @@ QWEN38_UPSCALE_CONFIG = "configs/colab_qwen38_27b_bf16_upscale.yaml"
 # "v2_read_text" 로, TRAIN_SCOPE 를 "fold0" 으로 두십시오. 가중치가 16GB뿐이라 24GB급
 # GPU에서도 bf16 추론이 들어갑니다.
 INTERNVL_CONFIG = "configs/colab_internvl35_8b_bf16.yaml"
+# Qwen3-VL-32B-Instruct 비교 실험용 설정입니다. 해상도와 학습 설정은 27B 확대본과 같고
+# 모델만 다릅니다. 프롬프트는 설정 파일이 v2_read_text 로 적어 두었으므로 PROMPT_ID 도
+# "v2_read_text" 로 맞추십시오. 가중치가 66GB여서 80GB A100에서 bf16 추론은 들어가지만
+# 학습은 아래 5번 절이 막습니다(학습 하한 86GB).
+QWEN3VL_CONFIG = "configs/colab_qwen3vl_32b_bf16_upscale.yaml"
 CONFIG = ""                       # 비워 두면 아래 셀이 정책과 VRAM을 보고 정합니다. 직접 적으면 그 값을 씁니다.
 PROMPT_ID = "v1_image_only"       # 학습과 추론이 모두 이 프롬프트를 씁니다.
 
@@ -2627,6 +2661,12 @@ FT_RUN_ID = "colab27b_ft_bf16"
 # 단계에서 쓰는 값이며 기본값입니다. "full" 로 바꾸면 fold 0까지 합친 6,690문항을 모두
 # 학습합니다. 최종 제출 모델을 만들 때에만 쓰십시오.
 TRAIN_SCOPE = "fold0"
+# TRAIN_SCOPE 가 "fold0" 일 때 어느 fold를 검증으로 쓸지 정합니다. 기본값 0은 지금까지와
+# 똑같이 팀 공식 fold 0 분할을 씁니다. 1~4로 바꾸면 5번 절이 artifacts/data/split_fold{N}.json
+# 을 쓰고 검증 id도 그 파일에서 읽으며, run-id 뒤에 "_fold{N}" 이 붙어서 기존 run과 섞이지
+# 않습니다. 그 분할 파일은 `python scripts/folds_to_split.py --scope fold --val-fold N` 으로
+# 미리 만들어 두어야 합니다(artifacts/data/train_folds.csv 를 읽습니다).
+VAL_FOLD = 0
 SPLIT_FILE_FOLD0 = "artifacts/data/split_fold0.json"  # 팀 공식 학습 분할 (train_fold1234, 5,358문항)
 SPLIT_FILE_FULL = "artifacts/data/split_full.json"    # fold 0까지 합친 전체 (6,690문항)
 VAL_IDS_FILE = "fold_csv_files/val_fold0.csv"      # 팀 공식 검증 분할 (fold 0, 1,344문항)
@@ -2642,6 +2682,14 @@ N_TEST_ITEMS = 6714
 # 파일 이름 뒤에 "_xadapter" 가 붙습니다. 기본 해상도로 학습한 adapter를 확대 설정으로
 # 추론할 때 쓰는 값입니다.
 ADAPTER_RUN_ID = ""
+
+# --- 선택 단계: epoch 경계 adapter로 추론 ---
+# 비워 두면 final_adapter 를 씁니다. 숫자를 적으면 15번 절과 17번 절이 그 run의
+# epoch_adapters/epoch_{n} 을 --adapter 로 넘깁니다. 설정 파일의
+# train.keep_epoch_adapters 가 true 이고 train.epochs 가 2 이상이던 run에만 있습니다.
+# ADAPTER_RUN_ID 와 함께 쓰면 그 run의 epoch adapter를 빌려 옵니다. 결과 파일 이름 뒤에
+# "_epoch{n}" 이 붙어서 마지막 epoch의 결과와 섞이지 않습니다.
+EPOCH_ADAPTER = ""
 
 # --- 선택 단계: 프롬프트 비교 ---
 RUN_PROMPT_COMPARE = False        # True로 바꾸면 아래 프롬프트로 fold 0을 한 번 더 추론합니다.
@@ -2891,9 +2939,18 @@ MODEL_CACHE_NEED_GB = min(MODEL_CACHE_NEED_GB, round(WEIGHTS_GB * 1.15 + 3.0, 1)
 # 합니다. 이보다 작으면 추론조차 완주하지 못하므로 여기에서 멈춥니다.
 VRAM_MIN_INFER_GB = round(20.0 * _weights_scale, 1)
 VRAM_MIN_TRAIN_GB = round(35.0 * _weights_scale, 1)
-VRAM_BF16_GB = round(70.0 * _weights_scale, 1)
-print("가중치 %.0fGB 기준 VRAM 하한: 추론 %.1fGB / 학습 %.1fGB / bf16 %.1fGB"
-      % (WEIGHTS_GB, VRAM_MIN_INFER_GB, VRAM_MIN_TRAIN_GB, VRAM_BF16_GB))
+# bf16 추론 하한과 bf16 학습 하한을 따로 계산합니다. 두 값을 하나로 묶어 두면, 가중치가
+# 66GB인 32B를 80GB A100에서 추론할 수 있는데도 nf4로 내려 버리기 때문입니다.
+#   추론: 가중치를 그대로 올린 다음 활성값과 KV 캐시만 얹으면 됩니다. 12GB를 봅니다.
+#         27B의 54GB에서는 66GB가 나와서 기존의 70GB와 같은 판정을 냅니다(그 사이 크기의
+#         GPU가 없습니다). 32B의 66GB에서는 78GB가 되어 80GB A100이 통과합니다.
+#   학습: gradient checkpointing 을 쓰지 않으므로 활성값이 크게 쌓입니다. 27B bf16 학습의
+#         peak가 57GB였던 것을 보면 가중치에 20GB는 더 있어야 합니다. 32B의 66GB에서는
+#         86GB가 되어 80GB A100에서는 학습을 막고 추론만 허용합니다.
+VRAM_BF16_INFER_GB = round(WEIGHTS_GB + 12.0, 1)
+VRAM_BF16_GB = round(max(70.0 * _weights_scale, WEIGHTS_GB + 20.0), 1)
+print("가중치 %.0fGB 기준 VRAM 하한: 추론 %.1fGB / 학습 %.1fGB / bf16 추론 %.1fGB / bf16 학습 %.1fGB"
+      % (WEIGHTS_GB, VRAM_MIN_INFER_GB, VRAM_MIN_TRAIN_GB, VRAM_BF16_INFER_GB, VRAM_BF16_GB))
 
 if VRAM_GB < VRAM_MIN_INFER_GB:
     raise RuntimeError(
@@ -2913,7 +2970,8 @@ TRAINING_ALLOWED = True
 if PRECISION_POLICY == "nf4":
     WANT_NF4 = True
 elif PRECISION_POLICY in ("auto", "bf16"):
-    WANT_NF4 = VRAM_GB < VRAM_BF16_GB
+    # 추론 하한으로 판정합니다. 학습을 막는 일은 아래의 bf16 학습 하한이 따로 합니다.
+    WANT_NF4 = VRAM_GB < VRAM_BF16_INFER_GB
 else:
     raise RuntimeError(
         "PRECISION_POLICY 는 bf16, auto, nf4 중 하나여야 합니다: %r" % (PRECISION_POLICY,))
@@ -3000,7 +3058,7 @@ if VRAM_GB < VRAM_MIN_TRAIN_GB:
 if VRAM_GB < VRAM_BF16_GB and (UPSCALE or PRECISION == "bf16"):
     TRAINING_ALLOWED = False
     print("=" * 72)
-    print("경고: 설정 %s 는 VRAM이 %.1fGB 이상일 때를 전제로 합니다." % (CONFIG, VRAM_BF16_GB))
+    print("경고: 설정 %s 의 학습은 VRAM이 %.1fGB 이상일 때를 전제로 합니다." % (CONFIG, VRAM_BF16_GB))
     print("이 가상 머신의 VRAM은 %.1fGB뿐이므로 학습을 시작할 수도, 이어서 할 수도 없습니다." % VRAM_GB)
     if UPSCALE:
         print("확대본은 평균 시각 토큰이 1.46배여서 정밀도를 낮춰도 학습 활성값이 들어가지 않습니다.")
@@ -3010,8 +3068,17 @@ if VRAM_GB < VRAM_BF16_GB and (UPSCALE or PRECISION == "bf16"):
 # --- 학습 범위를 정합니다 ---
 # "full" 은 fold 0까지 학습에 넣으므로, 그 run의 fold 0 정확도는 학습 데이터를 다시 맞힌
 # 점수가 됩니다. 15번 절과 16번 절은 그 사실을 알리고 건너뜁니다.
+VAL_FOLD = int(VAL_FOLD)
+if not 0 <= VAL_FOLD <= 4:
+    raise RuntimeError("VAL_FOLD 는 0~4 여야 합니다: %r" % (VAL_FOLD,))
 if TRAIN_SCOPE == "fold0":
-    SPLIT_FILE, SCOPE_SUFFIX = SPLIT_FILE_FOLD0, ""
+    # fold 0은 지금까지 돌린 run들이 쓰던 그대로 둡니다. 다른 fold를 검증으로 쓸 때에만
+    # 분할 파일과 검증 id 파일과 run-id 접미사가 함께 바뀝니다.
+    if VAL_FOLD == 0:
+        SPLIT_FILE, SCOPE_SUFFIX = SPLIT_FILE_FOLD0, ""
+    else:
+        SPLIT_FILE = "artifacts/data/split_fold%d.json" % VAL_FOLD
+        SCOPE_SUFFIX = "_fold%d" % VAL_FOLD
 elif TRAIN_SCOPE == "full":
     SPLIT_FILE, SCOPE_SUFFIX = SPLIT_FILE_FULL, "_full"
 else:
@@ -3019,7 +3086,22 @@ else:
 if not Path(SPLIT_FILE).exists():
     raise RuntimeError(
         "분할 파일이 없습니다: %s\n"
-        "`python scripts/folds_to_split.py` 를 먼저 실행하십시오." % SPLIT_FILE)
+        "`python scripts/folds_to_split.py` 를 먼저 실행하십시오. fold 0이 아닌 fold를 쓰려면 "
+        "`--scope fold --val-fold %d --folds-csv <전체 fold 배정 CSV>` 가 필요합니다."
+        % (SPLIT_FILE, VAL_FOLD))
+
+# 검증 id 목록입니다. fold 0은 팀이 준 CSV를 그대로 쓰고, 다른 fold는 분할 파일의 val_ids 를
+# 꺼내어 같은 형식의 CSV로 한 번 써 둡니다. vqa.predict --ids-file 과 evaluate_run.py
+# --val-ids 가 모두 'id' 컬럼 하나짜리 CSV를 읽기 때문입니다.
+if TRAIN_SCOPE == "fold0" and VAL_FOLD != 0:
+    _split_payload = json.loads(Path(SPLIT_FILE).read_text(encoding="utf-8"))
+    _val_ids = [str(i) for i in _split_payload.get("val_ids") or []]
+    if not _val_ids:
+        raise RuntimeError("%s 에 val_ids 가 없습니다." % SPLIT_FILE)
+    VAL_IDS_FILE = "artifacts/data/val_fold%d_ids.csv" % VAL_FOLD
+    Path(VAL_IDS_FILE).parent.mkdir(parents=True, exist_ok=True)
+    Path(VAL_IDS_FILE).write_text("id\n" + "\n".join(sorted(_val_ids)) + "\n", encoding="utf-8")
+    print("fold %d 검증 id %d개를 %s 에 썼습니다." % (VAL_FOLD, len(_val_ids), VAL_IDS_FILE))
 
 # --- run-id를 확정합니다 ---
 # 모델이 다르면 run 폴더 이름의 앞머리부터 달라야 합니다. 같은 프롬프트와 같은 해상도로
@@ -3075,20 +3157,40 @@ if ADAPTER_RUN_ID:
 else:
     ADAPTER_SOURCE_RUN = FT_RUN
     XADAPTER_SUFFIX = ""
-ADAPTER_PATH = str(RUN_ROOT_P / ADAPTER_SOURCE_RUN / "final_adapter")
-if ADAPTER_RUN_ID and not Path(ADAPTER_PATH).is_dir():
-    raise RuntimeError(
-        "ADAPTER_RUN_ID 로 지정한 run의 final_adapter 를 찾지 못했습니다: %s\n"
-        "run-id의 철자와 Drive 연결 상태를 확인하시고, 그 run의 학습이 끝났는지 먼저 "
-        "확인하십시오. 이 값을 비워 두면 이 노트북이 학습한 %s 의 adapter를 씁니다."
-        % (ADAPTER_PATH, FT_RUN)
-    )
+# EPOCH_ADAPTER 를 적으면 final_adapter 대신 그 epoch의 adapter를 씁니다. 형식이 같으므로
+# vqa.predict --adapter 가 그대로 받습니다. optimizer 상태가 없어서 학습 재개에는 쓸 수 없습니다.
+EPOCH_SUFFIX = ""
+if str(EPOCH_ADAPTER).strip():
+    EPOCH_NUMBER = int(str(EPOCH_ADAPTER).strip())
+    if EPOCH_NUMBER < 1:
+        raise RuntimeError("EPOCH_ADAPTER 는 1 이상의 epoch 번호여야 합니다: %r" % (EPOCH_ADAPTER,))
+    ADAPTER_PATH = str(RUN_ROOT_P / ADAPTER_SOURCE_RUN / "epoch_adapters" / ("epoch_%d" % EPOCH_NUMBER))
+    EPOCH_SUFFIX = "_epoch%d" % EPOCH_NUMBER
+    if not Path(ADAPTER_PATH).is_dir():
+        raise RuntimeError(
+            "EPOCH_ADAPTER 로 지정한 epoch adapter 를 찾지 못했습니다: %s\n"
+            "설정 파일의 train.keep_epoch_adapters 가 true 이고 train.epochs 가 2 이상이던 "
+            "run에만 이 디렉터리가 생깁니다. 학습이 그 epoch을 지났는지도 확인하십시오."
+            % ADAPTER_PATH
+        )
+else:
+    ADAPTER_PATH = str(RUN_ROOT_P / ADAPTER_SOURCE_RUN / "final_adapter")
+    if ADAPTER_RUN_ID and not Path(ADAPTER_PATH).is_dir():
+        raise RuntimeError(
+            "ADAPTER_RUN_ID 로 지정한 run의 final_adapter 를 찾지 못했습니다: %s\n"
+            "run-id의 철자와 Drive 연결 상태를 확인하시고, 그 run의 학습이 끝났는지 먼저 "
+            "확인하십시오. 이 값을 비워 두면 이 노트북이 학습한 %s 의 adapter를 씁니다."
+            % (ADAPTER_PATH, FT_RUN)
+        )
 # 결과 파일 이름에도 접미사를 붙여서 같은 run 폴더 안에서 섞이지 않게 합니다. 이 셀만 다시
 # 실행해도 접미사가 두 번 붙지 않도록 이미 붙어 있는지 확인합니다.
-if XADAPTER_SUFFIX and not VAL_OUT_FT.endswith(XADAPTER_SUFFIX):
-    VAL_OUT_FT = VAL_OUT_FT + XADAPTER_SUFFIX
-if XADAPTER_SUFFIX and not TEST_OUT_FT.endswith(XADAPTER_SUFFIX):
-    TEST_OUT_FT = TEST_OUT_FT + XADAPTER_SUFFIX
+for _suffix in (XADAPTER_SUFFIX, EPOCH_SUFFIX):
+    if not _suffix:
+        continue
+    if not VAL_OUT_FT.endswith(_suffix):
+        VAL_OUT_FT = VAL_OUT_FT + _suffix
+    if not TEST_OUT_FT.endswith(_suffix):
+        TEST_OUT_FT = TEST_OUT_FT + _suffix
 
 if not MIN_FREE_GB:
     if PRECISION == "bf16":
@@ -3108,11 +3210,12 @@ print("해상도           : min_pixels=%d, max_pixels=%d%s (시각 토큰 수�
       % (MIN_PIXELS, MAX_PIXELS, " [작은 이미지 확대본]" if UPSCALE else ""))
 print("프롬프트         : %s" % PROMPT_ID)
 print("학습 범위        : %s (%s)" % (TRAIN_SCOPE, SPLIT_FILE))
+print("검증 fold        : %d (%s)" % (VAL_FOLD, VAL_IDS_FILE))
 print("base run-id      : %s" % BASE_RUN)
 print("ft run-id        : %s" % FT_RUN)
-if ADAPTER_RUN_ID:
-    print("adapter 출처     : %s (다른 run에서 빌려 옵니다. 결과 이름에 %s 가 붙습니다)"
-          % (ADAPTER_PATH, XADAPTER_SUFFIX))
+if ADAPTER_RUN_ID or EPOCH_SUFFIX:
+    print("adapter 출처     : %s (결과 이름에 %s 가 붙습니다)"
+          % (ADAPTER_PATH, (XADAPTER_SUFFIX + EPOCH_SUFFIX) or "접미사 없이"))
 else:
     print("adapter 출처     : %s (이 노트북이 학습하는 run입니다)" % ADAPTER_PATH)
 print("프롬프트 비교 run-id : %s (선택 단계에서만 사용합니다)" % CMP_RUN)
@@ -3947,7 +4050,7 @@ elif post_train_ready():
            "--config", CONFIG, "--run-id", FT_RUN,
            "--csv", "train.csv", "--ids-file", VAL_IDS_FILE,
            "--adapter", ADAPTER, "--out-name", VAL_OUT_FT] + ALSO_BASE_ARGS + OVERRIDES
-    gpu_step(FT_RUN + "_val" + XADAPTER_SUFFIX, cmd, done=pred_done(FT_RUN, VAL_OUT_FT))
+    gpu_step(FT_RUN + "_val" + XADAPTER_SUFFIX + EPOCH_SUFFIX, cmd, done=pred_done(FT_RUN, VAL_OUT_FT))
 '''))
 
     cells.append(code(r'''
@@ -4012,7 +4115,7 @@ if post_train_ready():
            "--config", CONFIG, "--run-id", FT_RUN,
            "--csv", "test.csv",
            "--adapter", ADAPTER, "--out-name", TEST_OUT_FT] + ALSO_BASE_ARGS + OVERRIDES
-    gpu_step(FT_RUN + "_test" + XADAPTER_SUFFIX, cmd, done=pred_done(FT_RUN, TEST_OUT_FT))
+    gpu_step(FT_RUN + "_test" + XADAPTER_SUFFIX + EPOCH_SUFFIX, cmd, done=pred_done(FT_RUN, TEST_OUT_FT))
 '''))
 
     cells.append(code(r'''
@@ -4021,7 +4124,7 @@ if not pred_done(FT_RUN, TEST_OUT_FT):
     print("바로 위 셀이 끝난 다음에 이 셀을 다시 실행하십시오.")
 else:
     make_submission(pred_file(FT_RUN, TEST_OUT_FT),
-                    "artifacts/submission/%s_ft%s.csv" % (FT_RUN, XADAPTER_SUFFIX))
+                    "artifacts/submission/%s_ft%s%s.csv" % (FT_RUN, XADAPTER_SUFFIX, EPOCH_SUFFIX))
 '''))
 
     cells.append(md("""

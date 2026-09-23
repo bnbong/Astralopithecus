@@ -1,0 +1,53 @@
+# Colab Pro+ A100 80GB / transformers 5.x / Qwen3.5-27B bf16 LoRA / 작은 이미지 확대본, 3 epoch.
+# colab_qwen35_27b_bf16_upscale.yaml 을 그대로 복사하고 train.epochs 만 1에서 3으로 올렸다.
+#
+# 목적: 2026-09-23 밤, fold 0에서 epoch 1/2/3 adapter를 한 번의 학습으로 모두 뽑아 비교하는
+# 실험이다. epoch마다 adapter를 남기도록 train.keep_epoch_adapters 를 true로 켜고, 세
+# epoch을 전부 보존하도록 train.keep_last 를 3으로 올렸다. loss는 기존과 같은 기본값
+# full_vocab을 그대로 쓴다. 그 외 값은 colab_qwen35_27b_bf16_upscale.yaml과 전부 같다.
+#
+# 예상 시간: 기존 bf16 upscale 학습은 step당 14.9초였다. fold 0 학습은 step 670개
+# (epoch당 약 223 step) 짜리이므로, 3 epoch이면 670 step * 3 * 14.9초 ≈ 10.5시간이다.
+#
+# 주의: run_id_prefix와 res_suffix 파생 규칙은 파일 이름이 아니라 model_id와 upscale 여부만
+# 보므로, 이 설정의 run-id는 기존 확대 LoRA(colab_qwen35_27b_bf16_upscale.yaml)와 똑같이
+# colab27b_ft_bf16_upscale로 나온다. 그대로 두면 기존 run 폴더를 덮어쓰니, 노트북 21번의
+# 절 1에서 FT_RUN_ID를 반드시 "colab27b_ft_bf16_3ep" 로 손으로 바꿔야 한다. 다만
+# train.epochs와 train.keep_epoch_adapters는 config_hash에 들어가는 키라 config_hash 자체는
+# 기존 확대 LoRA와 다르게 나오므로, checkpoint 재개 검사는 서로 섞이지 않는다.
+model_id: Qwen/Qwen3.5-27B
+revision: fc05daec18b0a78c049392ed2e771dde82bdf654   # 2026-09-21 Colab A100에서 받은 스냅샷 커밋
+model_path: null          # 오프라인이면 로컬 스냅샷 디렉터리를 여기에 적는다
+precision: bf16
+attn_implementation: sdpa
+
+min_pixels: 1048576        # 1024 * 32 * 32
+max_pixels: 2097152        # 2048 * 32 * 32
+
+prompt_id: v1_image_only
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  targets: auto
+
+train:
+  lr: 1.0e-4
+  epochs: 3
+  micro_batch: 1
+  grad_accum: 8
+  warmup_ratio: 0.03
+  scheduler: linear
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  seed: 42
+  shuffle_options: true
+  save_every_steps: 50
+  save_every_minutes: 15
+  keep_last: 3
+  keep_epoch_adapters: true
+
+infer:
+  batch_size: 1
+  save_every_items: 50

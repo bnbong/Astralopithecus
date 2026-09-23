@@ -80,6 +80,14 @@ HASH_EXCLUDED_KEYS: tuple[str, ...] = (
 )
 
 
+#: train.loss 가 받는 값. "full_vocab"은 모델이 계산하는 전체 vocab CE(지금까지의 동작)이고,
+#: "choice4"는 감독 위치의 logits에서 a/b/c/d 네 개만 뽑아 만드는 4-way CE다.
+LOSS_MODES: tuple[str, ...] = ("full_vocab", "choice4")
+
+#: train.loss 를 적지 않았을 때 쓰는 값. DEFAULTS에 넣지 않는 까닭은 위 주석과 같다.
+DEFAULT_LOSS_MODE = "full_vocab"
+
+
 class ConfigError(ValueError):
     """설정 파일이나 덮어쓰기 값이 잘못되었을 때 발생한다."""
 
@@ -234,6 +242,15 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if weights_gb is not None:
         if isinstance(weights_gb, bool) or not isinstance(weights_gb, (int, float)) or weights_gb <= 0:
             raise ConfigError(f"weights_gb는 양수여야 합니다: {weights_gb!r}")
+    # train.loss 와 train.keep_epoch_adapters 도 같은 까닭으로 선택 키다. DEFAULTS 에 넣으면
+    # 이미 돌고 있는 27B run 들의 config_hash 가 바뀌어 checkpoint 재개가 거부된다. 설정 파일에
+    # 적혀 있을 때에만 형식을 보고, 적혀 있지 않으면 train.py 가 기본값으로 동작한다.
+    loss = get_path(config, "train.loss")
+    if loss is not None and str(loss) not in LOSS_MODES:
+        raise ConfigError(f"train.loss는 {' | '.join(LOSS_MODES)} 중 하나여야 합니다: {loss!r}")
+    keep_epoch_adapters = get_path(config, "train.keep_epoch_adapters")
+    if keep_epoch_adapters is not None and not isinstance(keep_epoch_adapters, bool):
+        raise ConfigError(f"train.keep_epoch_adapters는 true 또는 false여야 합니다: {keep_epoch_adapters!r}")
 
 
 def hashable_view(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -258,6 +275,8 @@ RUN_ID_PREFIX_BY_MODEL: dict[str, str] = {
     # InternVL3.5-8B는 27B와 계통이 다른 비교 실험용 모델이다. 예측이 27B run 폴더에 섞이면
     # 결합할 때 어느 쪽 확률인지 구분할 수 없으므로 앞머리를 따로 둔다.
     "internvl3_5-8b-hf": "internvl35_8b",
+    # Qwen3-VL-32B-Instruct는 3.5/3.8 계열과 구조도 크기도 달라서 앞머리를 따로 둔다.
+    "qwen3-vl-32b-instruct": "qwen3vl_32b",
 }
 
 #: model_id 가 위 표에 없을 때 쓰는 접두사.

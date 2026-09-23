@@ -115,3 +115,74 @@ def test_notebook_reads_the_model_id_from_the_config():
     assert '_cfg_model_id = str(_config_mod.get_path(_cfg_preview, "model_id"))' in source
     assert '_cfg_revision = _config_mod.get_path(_cfg_preview, "revision")' in source
     assert "MODEL_ID = _cfg_model_id" in source
+
+
+# --------------------------------------------------------------------------
+# VAL_FOLD / EPOCH_ADAPTER / Qwen3-VL-32B
+# --------------------------------------------------------------------------
+
+QWEN3VL_CONFIG = "configs/colab_qwen3vl_32b_bf16_upscale.yaml"
+
+
+def test_qwen3vl_32b_gets_its_own_run_id_prefix():
+    """27B run 폴더에 32B 예측이 섞이면 결합할 때 구분할 수 없다."""
+    base, ft = derive_run_ids(QWEN3VL_CONFIG, prompt_id="v2_read_text")
+    assert base == "qwen3vl_32b_base_bf16_v2_read_text_upscale"
+    assert ft == "qwen3vl_32b_ft_bf16_v2_read_text_upscale"
+    for other in (BF16_CONFIG, UPSCALE_CONFIG, QWEN38_UPSCALE_CONFIG):
+        assert not set(derive_run_ids(other, prompt_id="v2_read_text")) & {base, ft}
+
+
+def test_qwen3vl_32b_config_pins_what_the_notebook_reads():
+    cfg = config_mod.load_config(ROOT / QWEN3VL_CONFIG)
+    assert config_mod.get_path(cfg, "model_id") == "Qwen/Qwen3-VL-32B-Instruct"
+    assert len(str(config_mod.get_path(cfg, "revision"))) == 40
+    assert config_mod.get_path(cfg, "precision") == "bf16"
+    assert config_mod.get_path(cfg, "attn_implementation") == "sdpa"
+    assert config_mod.get_path(cfg, "prompt_id") == "v2_read_text"
+    assert config_mod.get_path(cfg, "weights_gb") == 66
+    assert config_mod.get_path(cfg, "lora.targets") == "auto"
+    # 해상도는 27B 확대본과 같아야 모델 하나만 다른 비교가 된다.
+    upscale = config_mod.load_config(ROOT / UPSCALE_CONFIG)
+    for key in ("min_pixels", "max_pixels"):
+        assert config_mod.get_path(cfg, key) == config_mod.get_path(upscale, key)
+
+
+def test_notebook_offers_the_qwen3vl_config():
+    assert 'QWEN3VL_CONFIG = "%s"' % QWEN3VL_CONFIG in notebook_source()
+
+
+def test_notebook_splits_the_bf16_inference_and_training_thresholds():
+    """가중치 66GB에서 80GB A100의 bf16 추론은 되고 학습은 막혀야 한다."""
+    source = notebook_source()
+    assert "VRAM_BF16_INFER_GB = round(WEIGHTS_GB + 12.0, 1)" in source
+    assert "VRAM_BF16_GB = round(max(70.0 * _weights_scale, WEIGHTS_GB + 20.0), 1)" in source
+    assert "WANT_NF4 = VRAM_GB < VRAM_BF16_INFER_GB" in source
+
+    def thresholds(weights_gb):
+        scale = weights_gb / 54.0
+        return round(weights_gb + 12.0, 1), round(max(70.0 * scale, weights_gb + 20.0), 1)
+
+    # 27B 54GB: 80GB A100에서 추론도 학습도 그대로 허용된다.
+    infer_27b, train_27b = thresholds(54.0)
+    assert 80.0 >= infer_27b and 80.0 >= train_27b
+    # 32B 66GB: 추론은 허용, 학습은 weights_gb + 20 = 86GB라서 막힌다.
+    infer_32b, train_32b = thresholds(66.0)
+    assert 80.0 >= infer_32b
+    assert train_32b == 86.0 and 80.0 < train_32b
+
+
+def test_notebook_parameter_cell_offers_val_fold_and_epoch_adapter():
+    source = notebook_source()
+    assert "VAL_FOLD = 0" in source
+    assert 'EPOCH_ADAPTER = ""' in source
+    # fold 0은 지금까지 쓰던 분할과 검증 id를 그대로 쓴다.
+    assert "SPLIT_FILE, SCOPE_SUFFIX = SPLIT_FILE_FOLD0, \"\"" in source
+    # 다른 fold는 split_fold{N}.json 과 _fold{N} 접미사를 쓴다.
+    assert 'SPLIT_FILE = "artifacts/data/split_fold%d.json" % VAL_FOLD' in source
+    assert 'SCOPE_SUFFIX = "_fold%d" % VAL_FOLD' in source
+    # 검증 id는 그 분할 파일의 val_ids 에서 읽는다.
+    assert '_val_ids = [str(i) for i in _split_payload.get("val_ids") or []]' in source
+    # epoch adapter는 final_adapter 자리에 그대로 들어간다.
+    assert '"epoch_adapters"' in source
+    assert 'EPOCH_SUFFIX = "_epoch%d" % EPOCH_NUMBER' in source

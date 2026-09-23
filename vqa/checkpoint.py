@@ -34,6 +34,11 @@ SCHEDULER_NAME = "scheduler.pt"
 RNG_NAME = "rng.pt"
 ADAPTER_DIR = "adapter"
 PROCESSOR_DIR = "processor"
+EPOCH_ADAPTERS_DIR = "epoch_adapters"
+
+#: epoch 경계에서 저장한 checkpoint 를 표시하는 trainer_state.extra 키.
+#: 값은 끝난 epoch 번호(1부터)다. prune_checkpoints 가 이 표시를 보고 정리 대상에서 뺀다.
+EPOCH_BOUNDARY_KEY = "epoch_boundary"
 
 
 class CheckpointError(RuntimeError):
@@ -209,8 +214,13 @@ def save_checkpoint(
     scheduler: Any = None,
     keep_last: int = 2,
     rng: dict[str, Any] | None = None,
+    extra_state: dict[str, Any] | None = None,
 ) -> Path:
-    """checkpoint 하나를 저장하고 최종 디렉터리 경로를 돌려준다."""
+    """checkpoint 하나를 저장하고 최종 디렉터리 경로를 돌려준다.
+
+    `extra_state`를 주면 저장하는 trainer_state의 `extra`에만 얹는다. 메모리에 있는
+    `state`는 건드리지 않으므로, 재개할 때 그 표시가 다음 checkpoint로 옮겨붙지 않는다.
+    """
     step = int(state.global_step)
     run_path = Path(run_dir)
     ckpt_root = runtime.ensure_dir(checkpoints_dir(run_path))
@@ -231,6 +241,10 @@ def save_checkpoint(
         _save_torch(rng if rng is not None else runtime.rng_state(), build / RNG_NAME)
         state_payload = state.to_dict()
         state_payload["created"] = runtime.now_iso()
+        if extra_state:
+            merged = dict(state_payload.get("extra") or {})
+            merged.update(extra_state)
+            state_payload["extra"] = merged
         runtime.atomic_write_json(build / STATE_NAME, state_payload)
         runtime.fsync_dir(build)
 
@@ -292,8 +306,34 @@ def read_latest(run_dir: str | os.PathLike[str]) -> dict[str, Any] | None:
     return runtime.read_json_or_none(checkpoints_dir(run_dir) / LATEST_NAME)
 
 
+def epoch_boundary_of(checkpoint: str | os.PathLike[str]) -> int | None:
+    """epoch 경계에서 저장한 checkpoint면 끝난 epoch 번호를, 아니면 None을 돌려준다.
+
+    표시는 checkpoint 안의 trainer_state.json에 들어 있다. 그래서 세션이 끊겼다가 다시
+    붙어도 어느 checkpoint가 epoch 경계인지 다시 알아낼 수 있다.
+    """
+    payload = runtime.read_json_or_none(Path(checkpoint) / STATE_NAME)
+    if not isinstance(payload, dict):
+        return None
+    extra = payload.get("extra") or {}
+    if not isinstance(extra, dict):
+        return None
+    value = extra.get(EPOCH_BOUNDARY_KEY)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def prune_checkpoints(run_dir: str | os.PathLike[str], *, keep_last: int = 2) -> list[Path]:
-    """완결된 checkpoint를 최근 keep_last개만 남긴다. 임시 디렉터리도 치운다."""
+    """완결된 checkpoint를 최근 keep_last개만 남긴다. 임시 디렉터리도 치운다.
+
+    epoch 경계 표시가 붙은 checkpoint는 세는 대상에서도 지우는 대상에서도 뺀다. epoch마다
+    하나씩만 늘어나므로 개수가 통제되고, 여러 epoch을 돈 run에서 중간 epoch의 상태를
+    나중에 다시 꺼내 볼 수 있다.
+    """
     root = checkpoints_dir(run_dir)
     if not root.exists():
         return []
@@ -308,8 +348,9 @@ def prune_checkpoints(run_dir: str | os.PathLike[str], *, keep_last: int = 2) ->
         (complete if ok else incomplete).append(path)
 
     removed: list[Path] = []
-    if keep_last > 0 and len(complete) > keep_last:
-        for path in complete[: len(complete) - keep_last]:
+    prunable = [path for path in complete if epoch_boundary_of(path) is None]
+    if keep_last > 0 and len(prunable) > keep_last:
+        for path in prunable[: len(prunable) - keep_last]:
             shutil.rmtree(path, ignore_errors=True)
             removed.append(path)
     # 완결된 것이 충분히 있으면 깨진 잔해도 치운다.
@@ -396,6 +437,35 @@ def final_adapter_dir(run_dir: str | os.PathLike[str]) -> Path:
     return Path(run_dir) / "final_adapter"
 
 
+def epoch_adapters_dir(run_dir: str | os.PathLike[str]) -> Path:
+    """epoch 경계 adapter들을 모아 두는 디렉터리."""
+    return Path(run_dir) / EPOCH_ADAPTERS_DIR
+
+
+def epoch_adapter_dir(run_dir: str | os.PathLike[str], epoch: int) -> Path:
+    """epoch n을 끝낸 시점의 adapter 위치. n은 1부터 센다."""
+    return epoch_adapters_dir(run_dir) / f"epoch_{int(epoch)}"
+
+
+def list_epoch_adapters(run_dir: str | os.PathLike[str]) -> list[Path]:
+    """검증을 통과한 epoch adapter 디렉터리를 epoch 오름차순으로 돌려준다."""
+    root = epoch_adapters_dir(run_dir)
+    if not root.exists():
+        return []
+    found: list[tuple[int, Path]] = []
+    for item in root.iterdir():
+        if not item.is_dir() or not item.name.startswith("epoch_"):
+            continue
+        try:
+            number = int(item.name[len("epoch_") :])
+        except ValueError:
+            continue
+        ok, _ = verify_checkpoint(item)
+        if ok:
+            found.append((number, item))
+    return [path for _, path in sorted(found)]
+
+
 def final_processor_dir(run_dir: str | os.PathLike[str]) -> Path:
     """학습이 끝났을 때 한 번만 남기는 processor 사본 위치.
 
@@ -415,6 +485,61 @@ def training_is_finished(run_dir: str | os.PathLike[str]) -> bool:
     return ok
 
 
+def save_adapter_snapshot(
+    *,
+    dest: str | os.PathLike[str],
+    scratch_dir: str | os.PathLike[str],
+    adapter_saver: Callable[[Path], None],
+    state: TrainerState,
+    processor_saver: Callable[[Path], None] | None = None,
+    label: str = "final_adapter",
+    extra_state: dict[str, Any] | None = None,
+) -> Path:
+    """adapter 가중치만 담은 디렉터리를 checkpoint와 같은 안전 절차로 저장한다.
+
+    `processor_saver`를 주면 `<dest>/processor`에 processor도 함께 남긴다. COMPLETE를
+    쓰기 전에 넣어야 해시 목록에 포함되므로 여기서 같이 처리한다. optimizer와 scheduler는
+    넣지 않는다. 이 디렉터리는 재개가 아니라 추론에 쓰는 것이기 때문이다.
+    """
+    dest_path = Path(dest)
+    scratch = runtime.ensure_dir(Path(scratch_dir))
+    build = scratch / f".build_{label}_{os.getpid()}"
+    if build.exists():
+        shutil.rmtree(build, ignore_errors=True)
+    build.mkdir(parents=True)
+    try:
+        adapter_saver(build)
+        if processor_saver is not None:
+            processor_saver(runtime.ensure_dir(build / PROCESSOR_DIR))
+        state_payload = state.to_dict()
+        if extra_state:
+            merged = dict(state_payload.get("extra") or {})
+            merged.update(extra_state)
+            state_payload["extra"] = merged
+        runtime.atomic_write_json(build / STATE_NAME, state_payload)
+        runtime.fsync_dir(build)
+        local_hashes = hash_tree(build)
+
+        staged = dest_path.parent / f".tmp_{label}_{os.getpid()}"
+        if staged.exists():
+            shutil.rmtree(staged, ignore_errors=True)
+        runtime.copy_tree_fsync(build, staged)
+        if hash_tree(staged) != local_hashes:
+            raise CheckpointError(f"{label} 사본의 해시가 다릅니다.")
+        runtime.atomic_write_json(
+            staged / COMPLETE_NAME,
+            {"created": runtime.now_iso(), "files": hash_tree(staged), "state": state_payload},
+        )
+        runtime.fsync_dir(staged)
+        final = runtime.replace_dir(staged, dest_path)
+        ok, reason = verify_checkpoint(final)
+        if not ok:
+            raise CheckpointError(f"{label} 검증 실패: {reason}")
+        return final
+    finally:
+        shutil.rmtree(build, ignore_errors=True)
+
+
 def save_final_adapter(
     *,
     run_dir: str | os.PathLike[str],
@@ -423,40 +548,35 @@ def save_final_adapter(
     state: TrainerState,
     processor_saver: Callable[[Path], None] | None = None,
 ) -> Path:
-    """최종 adapter를 checkpoint와 같은 안전 절차로 저장한다.
+    """최종 adapter를 `final_adapter/` 에 저장한다."""
+    return save_adapter_snapshot(
+        dest=final_adapter_dir(Path(run_dir)),
+        scratch_dir=scratch_dir,
+        adapter_saver=adapter_saver,
+        state=state,
+        processor_saver=processor_saver,
+        label="final_adapter",
+    )
 
-    `processor_saver`를 주면 `final_adapter/processor`에 processor도 한 번만 남긴다.
-    COMPLETE를 쓰기 전에 넣어야 해시 목록에 포함되므로 여기서 함께 처리한다.
+
+def save_epoch_adapter(
+    *,
+    run_dir: str | os.PathLike[str],
+    scratch_dir: str | os.PathLike[str],
+    adapter_saver: Callable[[Path], None],
+    state: TrainerState,
+    epoch: int,
+) -> Path:
+    """epoch 하나를 끝낸 시점의 adapter를 `epoch_adapters/epoch_{n}/` 에 저장한다.
+
+    형식은 `final_adapter` 와 같다. 그래서 `vqa.predict --adapter` 에 이 디렉터리를 그대로
+    넘길 수 있다. optimizer 상태가 없으므로 재개에는 쓸 수 없고 추론에만 쓴다.
     """
-    run_path = Path(run_dir)
-    scratch = runtime.ensure_dir(Path(scratch_dir))
-    build = scratch / f".build_final_{os.getpid()}"
-    if build.exists():
-        shutil.rmtree(build, ignore_errors=True)
-    build.mkdir(parents=True)
-    try:
-        adapter_saver(build)
-        if processor_saver is not None:
-            processor_saver(runtime.ensure_dir(build / PROCESSOR_DIR))
-        runtime.atomic_write_json(build / STATE_NAME, state.to_dict())
-        runtime.fsync_dir(build)
-        local_hashes = hash_tree(build)
-
-        staged = run_path / f".tmp_final_adapter_{os.getpid()}"
-        if staged.exists():
-            shutil.rmtree(staged, ignore_errors=True)
-        runtime.copy_tree_fsync(build, staged)
-        if hash_tree(staged) != local_hashes:
-            raise CheckpointError("final_adapter 사본의 해시가 다릅니다.")
-        runtime.atomic_write_json(
-            staged / COMPLETE_NAME,
-            {"created": runtime.now_iso(), "files": hash_tree(staged), "state": state.to_dict()},
-        )
-        runtime.fsync_dir(staged)
-        final = runtime.replace_dir(staged, final_adapter_dir(run_path))
-        ok, reason = verify_checkpoint(final)
-        if not ok:
-            raise CheckpointError(f"final_adapter 검증 실패: {reason}")
-        return final
-    finally:
-        shutil.rmtree(build, ignore_errors=True)
+    return save_adapter_snapshot(
+        dest=epoch_adapter_dir(run_dir, epoch),
+        scratch_dir=scratch_dir,
+        adapter_saver=adapter_saver,
+        state=state,
+        label=f"epoch_adapter_{int(epoch)}",
+        extra_state={EPOCH_BOUNDARY_KEY: int(epoch)},
+    )

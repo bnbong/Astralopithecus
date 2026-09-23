@@ -1,0 +1,71 @@
+# Colab Pro+ A100 80GB / transformers 5.x / Qwen3-VL-32B-Instruct bf16 / 작은 이미지 확대본.
+# colab_qwen35_27b_bf16_upscale.yaml 을 그대로 복사하고 model_id 와 revision, prompt_id,
+# weights_gb 만 바꾸었다.
+#
+# 목적: 27B Qwen3.5 계열보다 큰 32B 모델이 같은 해상도와 같은 프롬프트에서 얼마나 다른지
+# 본다. 해상도, LoRA 설정, 학습 하이퍼파라미터를 27B 확대본과 한 글자도 다르지 않게 두었다.
+#
+# 구조: HF API로 받은 config.json 의 architectures 는 Qwen3VLForConditionalGeneration,
+# model_type 은 qwen3_vl 이다. 언어 쪽이 64층에 hidden 5,120, vision 쪽은 27층짜리 자체
+# encoder 이고 deepstack_visual_indexes 가 [8, 16, 24] 다. 3.5 계열과 이름 체계가 달라서
+# LoRA target 탐색과 vision 경로 제외가 그대로 맞는지는 preflight 로 반드시 확인해야 한다.
+# 특히 lora_targets, chat_template_tail, label_mask, train_infer_prefix_match,
+# pixel_limits 다섯 가지를 보아야 한다.
+#
+# 해상도: preprocessor_config.json 의 image_processor_type 은 Qwen2VLImageProcessorFast 이고
+# patch_size 16, merge_size 2 다. 이 processor 는 min_pixels 와 max_pixels 를 받아서
+# size.shortest_edge / size.longest_edge 로 옮긴다. InternVL 과 달리 두 값이 실제로 적용되므로
+# processor_kwargs 를 따로 쓸 까닭이 없다. 다만 patch 가 14가 아니라 16이어서 같은 픽셀 수에서
+# 나오는 시각 토큰 수가 27B 와 다르다. 8번 절 preflight 의 pixel_limits 로 실측하십시오.
+#
+# thinking: chat_template.json 과 tokenizer_config.json 의 chat_template 을 받아 확인한 결과
+# 두 템플릿이 바이트 단위로 같고, <think> 태그도 enable_thinking 분기도 아예 없다. generation
+# prompt 꼬리는 "<|im_start|>assistant\n" 이고 종료 토큰은 <|im_end|> 다. Instruct 판이라
+# thinking 을 끌 일이 없다. vqa/prompt.py 가 넘기는 enable_thinking=False 는 이 템플릿에서
+# 쓰이지 않는 인자여서 무시된다.
+#
+# 가중치: bf16 safetensors 14개로 약 66GB(66.7 GB) 다. 27B 의 54GB 보다 12GB 크다. 이 값이
+# 21번 노트북 5번 절의 VRAM 하한과 캐시 여유 판단에 쓰인다. 80GB A100 에서 bf16 추론은
+# 들어가지만, gradient checkpointing 없이 학습하기에는 활성값 여유가 모자란다. 5번 절은
+# 학습 하한을 weights_gb + 20 = 86GB 로 잡으므로 80GB 가상 머신에서는 학습을 막고 추론만
+# 허용한다. 학습까지 하려면 gradient checkpointing 을 먼저 붙여야 한다.
+#
+# 라이선스: apache-2.0.
+model_id: Qwen/Qwen3-VL-32B-Instruct
+revision: 0cfaf48183f594c314753d30a4c4974bc75f3ccb   # 2026-09-23 HF API로 조회한 main 브랜치 커밋
+model_path: null          # 오프라인이면 로컬 스냅샷 디렉터리를 여기에 적는다
+precision: bf16
+attn_implementation: sdpa
+
+# bf16 가중치 크기(GB). 21번 노트북이 VRAM 하한과 캐시 여유를 판단할 때 읽는다.
+weights_gb: 66
+
+min_pixels: 1048576        # 1024 * 32 * 32, 27B 확대본과 같은 값
+max_pixels: 2097152        # 2048 * 32 * 32, 27B 확대본과 같은 값
+
+prompt_id: v2_read_text
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  targets: auto
+
+train:
+  lr: 1.0e-4
+  epochs: 1
+  micro_batch: 1
+  grad_accum: 8
+  warmup_ratio: 0.03
+  scheduler: linear
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  seed: 42
+  shuffle_options: true
+  save_every_steps: 50
+  save_every_minutes: 15
+  keep_last: 2
+
+infer:
+  batch_size: 1
+  save_every_items: 50

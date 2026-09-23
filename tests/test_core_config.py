@@ -22,6 +22,7 @@ EXPECTED_CONFIGS = [
     "colab_qwen35_27b_bf16.yaml",
     "colab_qwen35_27b_nf4.yaml",
     "colab_qwen35_27b_bf16_upscale.yaml",
+    "colab_qwen35_27b_bf16_upscale_3ep.yaml",
     "colab_qwen38_27b_bf16_upscale.yaml",
 ]
 
@@ -224,6 +225,61 @@ def test_config_hash_separates_the_two_27b_upscale_runs():
     qwen38 = config_mod.load_config(CONFIG_DIR / "colab_qwen38_27b_bf16_upscale.yaml")
     # 해시가 같으면 --resume auto 가 3.5 checkpoint를 3.8 run에 이어 붙일 수 있다.
     assert config_mod.config_hash(qwen35) != config_mod.config_hash(qwen38)
+
+
+#: 3ep 설정과 원본 upscale 설정 사이에서 달라도 되는 키. epoch 수를 올리고 epoch별
+#: adapter를 남기려고 만든 설정이므로 이 세 키만 다르다.
+UPSCALE_3EP_DIFF_KEYS = {"train.epochs", "train.keep_epoch_adapters", "train.keep_last"}
+
+
+def test_qwen35_upscale_3ep_config_differs_from_base_only_in_epoch_settings():
+    base = config_mod.load_config(CONFIG_DIR / "colab_qwen35_27b_bf16_upscale.yaml")
+    ep3 = config_mod.load_config(CONFIG_DIR / "colab_qwen35_27b_bf16_upscale_3ep.yaml")
+    keys_to_check = [
+        "model_id",
+        "revision",
+        "model_path",
+        "precision",
+        "attn_implementation",
+        "min_pixels",
+        "max_pixels",
+        "prompt_id",
+        "lora.r",
+        "lora.alpha",
+        "lora.dropout",
+        "lora.targets",
+        "train.lr",
+        "train.epochs",
+        "train.micro_batch",
+        "train.grad_accum",
+        "train.warmup_ratio",
+        "train.scheduler",
+        "train.weight_decay",
+        "train.max_grad_norm",
+        "train.seed",
+        "train.shuffle_options",
+        "train.save_every_steps",
+        "train.save_every_minutes",
+        "train.keep_last",
+        "train.keep_epoch_adapters",
+        "infer.batch_size",
+        "infer.save_every_items",
+    ]
+    differing = {
+        key for key in keys_to_check
+        if config_mod.get_path(base, key) != config_mod.get_path(ep3, key)
+    }
+    assert differing == UPSCALE_3EP_DIFF_KEYS, differing
+    assert config_mod.get_path(ep3, "train.epochs") == 3
+    assert config_mod.get_path(ep3, "train.keep_epoch_adapters") is True
+    assert config_mod.get_path(ep3, "train.keep_last") == 3
+
+
+def test_config_hash_separates_the_3ep_run_from_the_base_upscale_run():
+    base = config_mod.load_config(CONFIG_DIR / "colab_qwen35_27b_bf16_upscale.yaml")
+    ep3 = config_mod.load_config(CONFIG_DIR / "colab_qwen35_27b_bf16_upscale_3ep.yaml")
+    # 해시가 같으면 --resume auto 가 1 epoch checkpoint를 3ep run에 이어 붙일 수 있다.
+    assert config_mod.config_hash(base) != config_mod.config_hash(ep3)
 
 
 @pytest.mark.parametrize(
