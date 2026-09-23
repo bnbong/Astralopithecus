@@ -1,0 +1,77 @@
+<mxfile host="app.diagrams.net">
+    <diagram id="pageC" name="오답 분류">
+        <mxGraphModel dx="1180" dy="540" grid="0" gridSize="10" guides="1" tooltips="1" connect="1"
+            arrows="1" fold="1" page="1" pageScale="1" pageWidth="1180" pageHeight="540" math="0"
+            shadow="0" background="#150F3A">
+            <root>
+                <mxCell id="c0" />
+                <mxCell id="c1" parent="c0" />
+                <mxCell id="c_total" value="56문항"
+                    style="rounded=1;arcSize=12;fillColor=#C9BFFF;strokeColor=#FFFFFF;strokeWidth=2;fontColor=#0B0824;fontStyle=1;fontFamily=Pretendard;fontSize=24;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="c1">
+                    <mxGeometry x="490" y="60" width="200" height="90" as="geometry" />
+                </mxCell>
+                <mxCell id="c_n1" value="35"
+                    style="text;fontColor=#FFFFFF;fontFamily=Pretendard;fontStyle=1;fontSize=40;align=center;verticalAlign=middle;html=1;"
+                    vertex="1" parent="c1">
+                    <mxGeometry x="182" y="190" width="180" height="50" as="geometry" />
+                </mxCell>
+                <mxCell id="c_n2" value="12"
+                    style="text;fontColor=#FFFFFF;fontFamily=Pretendard;fontStyle=1;fontSize=40;align=center;verticalAlign=middle;html=1;"
+                    vertex="1" parent="c1">
+                    <mxGeometry x="394" y="190" width="180" height="50" as="geometry" />
+                </mxCell>
+                <mxCell id="c_n3" value="8"
+                    style="text;fontColor=#FFFFFF;fontFamily=Pretendard;fontStyle=1;fontSize=40;align=center;verticalAlign=middle;html=1;"
+                    vertex="1" parent="c1">
+                    <mxGeometry x="606" y="190" width="180" height="50" as="geometry" />
+                </mxCell>
+                <mxCell id="c_n4" value="1"
+                    style="text;fontColor=#FFFFFF;fontFamily=Pretendard;fontStyle=1;fontSize=40;align=center;verticalAlign=middle;html=1;"
+                    vertex="1" parent="c1">
+                    <mxGeometry x="818" y="190" width="180" height="50" as="geometry" />
+                </mxCell>
+                <mxCell id="c_g1" value="라벨 문제"
+                    style="rounded=1;arcSize=12;fillColor=#1E1750;strokeColor=#6B3FD6;strokeWidth=1.5;fontColor=#ECE9FF;fontFamily=Pretendard;fontSize=22;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="c1">
+                    <mxGeometry x="182" y="260" width="180" height="110" as="geometry" />
+                </mxCell>
+                <mxCell id="c_g2" value="작은 글자"
+                    style="rounded=1;arcSize=12;fillColor=#1E1750;strokeColor=#C9BFFF;strokeWidth=2.5;fontColor=#FFFFFF;fontStyle=1;fontFamily=Pretendard;fontSize=24;shadow=1;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="c1">
+                    <mxGeometry x="394" y="260" width="180" height="110" as="geometry" />
+                </mxCell>
+                <mxCell id="c_g3" value="추론 오류"
+                    style="rounded=1;arcSize=12;fillColor=#1E1750;strokeColor=#C9BFFF;strokeWidth=2.5;fontColor=#FFFFFF;fontStyle=1;fontFamily=Pretendard;fontSize=24;shadow=1;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="c1">
+                    <mxGeometry x="606" y="260" width="180" height="110" as="geometry" />
+                </mxCell>
+                <mxCell id="c_g4" value="미점검"
+                    style="rounded=1;arcSize=12;fillColor=#0B0824;strokeColor=#9A90D9;strokeWidth=1;dashed=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=20;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="c1">
+                    <mxGeometry x="818" y="260" width="180" height="110" as="geometry" />
+                </mxCell>
+                <mxCell id="c_e1"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="c1" source="c_total" target="c_g1">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="c_e2"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="c1" source="c_total" target="c_g2">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="c_e3"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="c1" source="c_total" target="c_g3">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="c_e4"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="c1" source="c_total" target="c_g4">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>
