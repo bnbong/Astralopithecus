@@ -1,0 +1,87 @@
+<mxfile host="app.diagrams.net">
+    <diagram id="pageA" name="검증 설계">
+        <mxGraphModel dx="1180" dy="540" grid="0" gridSize="10" guides="1" tooltips="1" connect="1"
+            arrows="1" fold="1" page="1" pageScale="1" pageWidth="1180" pageHeight="540" math="0"
+            shadow="0" background="#150F3A">
+            <root>
+                <mxCell id="a0" />
+                <mxCell id="a1" parent="a0" />
+                <mxCell id="a_train" value="train&#xa;6,714문항"
+                    style="rounded=1;arcSize=12;fillColor=#1E1750;strokeColor=#6B3FD6;strokeWidth=1.5;fontColor=#ECE9FF;fontFamily=Pretendard;fontSize=22;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="a1">
+                    <mxGeometry x="40" y="230" width="160" height="80" as="geometry" />
+                </mxCell>
+                <mxCell id="a_fold0" value="fold 0&#xa;1,344&#xa;검증"
+                    style="rounded=1;arcSize=12;fillColor=#1E1750;strokeColor=#C9BFFF;strokeWidth=2.5;fontColor=#FFFFFF;fontStyle=1;fontFamily=Pretendard;fontSize=24;shadow=1;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="a1">
+                    <mxGeometry x="232" y="140" width="180" height="90" as="geometry" />
+                </mxCell>
+                <mxCell id="a_fold14" value="fold 1~4&#xa;5,358&#xa;학습"
+                    style="rounded=1;arcSize=12;fillColor=#1E1750;strokeColor=#C9BFFF;strokeWidth=2.5;fontColor=#FFFFFF;fontStyle=1;fontFamily=Pretendard;fontSize=24;shadow=1;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="a1">
+                    <mxGeometry x="232" y="330" width="180" height="90" as="geometry" />
+                </mxCell>
+                <mxCell id="a_model" value="학습된&#xa;모델"
+                    style="shape=hexagon;perimeter=hexagonPerimeter2;rounded=1;arcSize=12;fillColor=#1E1750;strokeColor=#6B3FD6;strokeWidth=1.5;fontColor=#ECE9FF;fontFamily=Pretendard;fontSize=22;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="a1">
+                    <mxGeometry x="444" y="225" width="140" height="110" as="geometry" />
+                </mxCell>
+                <mxCell id="a_acc" value="fold 0&#xa;정확도"
+                    style="rounded=1;arcSize=12;fillColor=#1E1750;strokeColor=#6B3FD6;strokeWidth=1.5;fontColor=#ECE9FF;fontFamily=Pretendard;fontSize=22;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="a1">
+                    <mxGeometry x="616" y="140" width="170" height="90" as="geometry" />
+                </mxCell>
+                <mxCell id="a_public" value="Kaggle&#xa;Public"
+                    style="rounded=1;arcSize=12;fillColor=#1E1750;strokeColor=#6B3FD6;strokeWidth=1.5;fontColor=#ECE9FF;fontFamily=Pretendard;fontSize=22;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="a1">
+                    <mxGeometry x="616" y="330" width="170" height="90" as="geometry" />
+                </mxCell>
+                <mxCell id="a_mcnemar" value="McNemar&#xa;검정"
+                    style="rounded=1;arcSize=12;fillColor=#C9BFFF;strokeColor=#FFFFFF;strokeWidth=2;fontColor=#0B0824;fontStyle=1;fontFamily=Pretendard;fontSize=24;whiteSpace=wrap;html=1;"
+                    vertex="1" parent="a1">
+                    <mxGeometry x="818" y="225" width="200" height="100" as="geometry" />
+                </mxCell>
+                <mxCell id="a_e1"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="a1" source="a_train" target="a_fold0">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="a_e2"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="a1" source="a_train" target="a_fold14">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="a_e3" value="학습"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#C9BFFF;strokeWidth=3;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="a1" source="a_fold14" target="a_model">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="a_e4" value="검증"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;dashed=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="a1" source="a_fold0" target="a_model">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="a_e5"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="a1" source="a_model" target="a_acc">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="a_e6"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="a1" source="a_model" target="a_public">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="a_e7"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="a1" source="a_acc" target="a_mcnemar">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="a_e8"
+                    style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9A90D9;strokeWidth=2;endArrow=block;endFill=1;fontColor=#9A90D9;fontFamily=Pretendard;fontSize=16;"
+                    edge="1" parent="a1" source="a_public" target="a_mcnemar">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>
