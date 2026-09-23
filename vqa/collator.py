@@ -327,15 +327,53 @@ def inference_input_ids(processor: Any, spec: PromptSpec, view: "SampleView") ->
     return [int(i) for i in enc["input_ids"][0]]
 
 
+def encode_batch_right_padded(processor: Any, texts: Sequence[str], images: Sequence[Any]):
+    """학습 배치를 인코딩하되 pad를 반드시 오른쪽에 붙인다.
+
+    일부 processor는 tokenizer.padding_side와 무관하게 자기 기본값으로 왼쪽 padding을
+    한다. InternVL이 그렇다(InternVLProcessorKwargs의 text_kwargs 기본값이 left). 왼쪽
+    pad가 붙으면 감독 위치 앞 prefix의 머리에 pad가 섞여 추론 prefix와 토큰 단위로
+    어긋난다. 그래서 호출할 때 오른쪽을 명시한다. padding_side 인자를 받지 않는
+    processor에서는 인자 없이 다시 부르고 tokenizer의 설정을 그대로 따른다.
+    """
+    kwargs = dict(text=list(texts), images=list(images), padding=True, return_tensors="pt")
+    try:
+        return processor(**kwargs, padding_side="right")
+    except TypeError:
+        return processor(**kwargs)
+
+
+def strip_pad_positions(input_ids, attention_mask=None) -> list[int]:
+    """attention_mask가 0인 자리를 뺀 실제 토큰 열.
+
+    오른쪽 padding에서는 앞쪽이 그대로라 결과가 달라지지 않는다. 왼쪽 padding에서만
+    머리의 pad가 걷힌다.
+    """
+    ids = [int(i) for i in input_ids]
+    if attention_mask is None:
+        return ids
+    mask = [int(m) for m in attention_mask]
+    return [token for token, keep in zip(ids, mask) if keep]
+
+
 def compare_prefix_with_inference(
     processor: Any,
     spec: PromptSpec,
     view: "SampleView",
     train_input_ids,
     position: int,
+    attention_mask=None,
 ) -> dict[str, Any]:
-    """감독 위치 앞의 토큰 열이 추론 쪽 input_ids와 같은지 본다."""
-    train_prefix = [int(i) for i in train_input_ids[: int(position)]]
+    """감독 위치 앞의 토큰 열이 추론 쪽 input_ids와 같은지 본다.
+
+    attention_mask를 주면 pad 자리를 빼고 비교한다. 왼쪽 padding을 하는 processor에서
+    prefix 머리에 pad가 섞이는 것을 걸러내기 위한 것이고, 오른쪽 padding에서는 결과가
+    달라지지 않는다.
+    """
+    train_prefix = strip_pad_positions(
+        train_input_ids[: int(position)],
+        None if attention_mask is None else attention_mask[: int(position)],
+    )
     infer_ids = inference_input_ids(processor, spec, view)
     match = train_prefix == infer_ids
     first_diff = None
@@ -412,7 +450,7 @@ class AnswerOnlyCollator:
             images.append(view.image)
             golds.append(view.gold_letter)
 
-        enc = self.processor(text=texts, images=images, padding=True, return_tensors="pt")
+        enc = encode_batch_right_padded(self.processor, texts, images)
         input_ids = enc["input_ids"]
         attention_mask = enc["attention_mask"]
         labels = torch.full_like(input_ids, -100)
@@ -435,7 +473,12 @@ class AnswerOnlyCollator:
             self._prefix_verified = True
             first_position = int(torch.where(labels[0] != -100)[0][0])
             report = compare_prefix_with_inference(
-                self.processor, self.spec, batch[0], input_ids[0], first_position
+                self.processor,
+                self.spec,
+                batch[0],
+                input_ids[0],
+                first_position,
+                attention_mask=attention_mask[0],
             )
             if not report["match"]:
                 raise LabelMaskError(

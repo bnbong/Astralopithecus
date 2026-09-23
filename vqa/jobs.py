@@ -737,6 +737,7 @@ def wait_job(
     run_root=None,
     poll: float = 30.0,
     timeout: float | None = None,
+    record_grace: float = 30.0,
     printer=print,
 ) -> dict[str, Any]:
     """job(자식 포함)이 끝날 때까지 기다린다.
@@ -744,8 +745,17 @@ def wait_job(
     poll마다 로그의 마지막 한 줄을 찍는다. 결과의 result는
     ok / failed / timeout / unknown / missing 중 하나다. auto-restart 없이 띄운 job은
     종료 코드를 기록해 줄 감시 프로세스가 없으므로 unknown이 된다.
+
+    run-root가 Google Drive(FUSE) 위에 있는 Colab 환경에서는 start가 방금 쓴 pid 기록이
+    곧바로 뒤이은 wait의 읽기에 보이지 않을 수 있다. 그래서 기록이 아직 없으면 곧바로
+    missing으로 끝내지 않고, record_grace초 동안 1초 간격으로 기록이 나타나기를 기다린다.
     """
     record = read_job(name, run_root)
+    if record is None and record_grace > 0:
+        grace_deadline = time.time() + float(record_grace)
+        while record is None and time.time() < grace_deadline:
+            time.sleep(1.0)
+            record = read_job(name, run_root)
     if record is None:
         return {"name": name, "exists": False, "result": "missing", "exit_code": None}
     if _record_is_foreign(record):
@@ -830,6 +840,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"stop은 기본 {DEFAULT_STOP_TIMEOUT:.0f}초, wait은 기본 무제한",
     )
     parser.add_argument("--poll", type=float, default=30.0, help="wait에서 로그를 찍는 간격(초)")
+    parser.add_argument(
+        "--record-grace",
+        type=float,
+        default=30.0,
+        help="wait에서 job 기록이 아직 안 보이면 missing 처리 전에 기다리는 시간(초). "
+        "Drive처럼 쓰기 직후 읽기가 늦게 반영되는 run-root를 위한 값",
+    )
     parser.add_argument(
         "--allow-concurrent",
         action="store_true",
@@ -927,7 +944,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.action == "wait":
-        result = wait_job(args.name, run_root=args.run_root, poll=args.poll, timeout=args.timeout)
+        result = wait_job(
+            args.name,
+            run_root=args.run_root,
+            poll=args.poll,
+            timeout=args.timeout,
+            record_grace=args.record_grace,
+        )
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:

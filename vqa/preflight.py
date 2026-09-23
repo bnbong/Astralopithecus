@@ -526,7 +526,12 @@ def check_prefix_match(
         position = int(torch.where(labels[b] != -100)[0][0])
         reports.append(
             collator_mod.compare_prefix_with_inference(
-                processor, spec, view, enc["input_ids"][b], position
+                processor,
+                spec,
+                view,
+                enc["input_ids"][b],
+                position,
+                attention_mask=enc["attention_mask"][b],
             )
         )
     bad = [r for r in reports if not r["match"]]

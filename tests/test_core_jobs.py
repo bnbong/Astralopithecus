@@ -479,9 +479,41 @@ def test_wait_without_supervisor_is_unknown(tmp_path):
 
 
 def test_wait_for_unknown_job(tmp_path):
-    result = jobs.wait_job("nope", run_root=tmp_path, poll=0.1)
+    result = jobs.wait_job("nope", run_root=tmp_path, poll=0.1, record_grace=0)
     assert result["result"] == "missing"
-    assert jobs.main(["wait", "--name", "nope", "--run-root", str(tmp_path)]) == 1
+    assert (
+        jobs.main(["wait", "--name", "nope", "--run-root", str(tmp_path), "--record-grace", "0"])
+        == 1
+    )
+
+
+def test_wait_waits_out_record_grace_before_reporting_missing(tmp_path):
+    """기록이 끝내 나타나지 않으면 record_grace를 다 기다린 뒤에야 missing이 된다."""
+    started = time.time()
+    result = jobs.wait_job("still-nope", run_root=tmp_path, poll=0.1, record_grace=0.5)
+    elapsed = time.time() - started
+    assert result["result"] == "missing"
+    assert elapsed >= 0.5
+
+
+def test_wait_finds_record_that_appears_during_grace(tmp_path, monkeypatch):
+    """Drive처럼 쓰기 직후 읽기가 늦게 반영되는 상황을 흉내 낸다: 기록이 grace 도중 나타난다."""
+    real_read_job = jobs.read_job
+    calls = {"n": 0}
+
+    def delayed_read_job(name, run_root=None):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return None
+        return real_read_job(name, run_root)
+
+    monkeypatch.setattr(jobs, "read_job", delayed_read_job)
+    command = [sys.executable, "-c", "print('done', flush=True)"]
+    jobs.start_job("late", command, run_root=tmp_path, auto_restart=1, cwd=str(REPO_ROOT))
+    result = jobs.wait_job("late", run_root=tmp_path, poll=0.2, timeout=60.0, record_grace=10.0)
+    assert result["result"] == "ok"
+    assert result["exit_code"] == 0
+    assert calls["n"] >= 3
 
 
 def test_wait_prints_last_log_line(tmp_path):
