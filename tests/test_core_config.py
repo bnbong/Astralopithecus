@@ -336,3 +336,71 @@ def test_training_text_reuses_the_inference_prefix_on_qwen38():
     trained = prompt_mod.training_text(processor, *args, "c")
     assert trained.startswith(prompt)
     assert trained[len(prompt):] == "c" + prompt_mod.end_of_turn_suffix(processor)
+
+
+# --------------------------------------------------------------------------
+# InternVL3.5-8B 비교 실험 설정
+# --------------------------------------------------------------------------
+
+
+def test_internvl_config_loads_with_its_own_keys():
+    cfg = config_mod.load_config(CONFIG_DIR / "colab_internvl35_8b_bf16.yaml")
+    assert config_mod.get_path(cfg, "model_id") == "OpenGVLab/InternVL3_5-8B-HF"
+    assert config_mod.get_path(cfg, "revision")
+    assert config_mod.get_path(cfg, "precision") == "bf16"
+    assert config_mod.get_path(cfg, "prompt_id") == "v2_read_text"
+    # 노트북이 VRAM 하한을 내릴 때 읽는 값이다.
+    assert config_mod.get_path(cfg, "weights_gb") == 16
+    # 타일 인자는 기본값을 쓰므로 빈 매핑이다.
+    assert config_mod.get_path(cfg, "processor_kwargs") == {}
+
+
+def test_internvl_run_id_prefix_is_separate_from_the_27b_runs():
+    cfg = config_mod.load_config(CONFIG_DIR / "colab_internvl35_8b_bf16.yaml")
+    prefix = config_mod.run_id_prefix(config_mod.get_path(cfg, "model_id"))
+    assert prefix == "internvl35_8b"
+    assert prefix != config_mod.DEFAULT_RUN_ID_PREFIX
+
+
+def test_optional_keys_do_not_change_the_hash_of_the_shipped_27b_configs():
+    """processor_kwargs 와 weights_gb 를 DEFAULTS 에 넣지 않았는지 확인한다.
+
+    기본값이 생기면 27B 설정의 config_hash 까지 바뀌어서, 이미 Drive에 쌓인 checkpoint를
+    `--resume auto` 로 이어서 학습할 수 없게 된다.
+    """
+    cfg = config_mod.load_config(CONFIG_DIR / "colab_qwen35_27b_bf16.yaml")
+    assert "processor_kwargs" not in cfg
+    assert "weights_gb" not in cfg
+
+
+def test_weights_gb_stays_outside_the_config_hash():
+    base = config_mod.load_config(CONFIG_DIR / "colab_internvl35_8b_bf16.yaml")
+    changed = config_mod.load_config(
+        CONFIG_DIR / "colab_internvl35_8b_bf16.yaml", ["weights_gb=32"]
+    )
+    assert config_mod.config_hash(base) == config_mod.config_hash(changed)
+
+
+def test_processor_kwargs_changes_the_config_hash():
+    """타일 개수는 입력 해상도를 바꾸므로 해시에 들어가야 한다."""
+    base = config_mod.load_config(CONFIG_DIR / "colab_internvl35_8b_bf16.yaml")
+    changed = config_mod.load_config(
+        CONFIG_DIR / "colab_internvl35_8b_bf16.yaml", ["processor_kwargs.max_patches=6"]
+    )
+    assert config_mod.config_hash(base) != config_mod.config_hash(changed)
+
+
+@pytest.mark.parametrize("bad", [3, "auto", [1, 2]])
+def test_processor_kwargs_must_be_a_mapping(bad):
+    cfg = config_mod.load_config(None, validate=False)
+    cfg["processor_kwargs"] = bad
+    with pytest.raises(config_mod.ConfigError):
+        config_mod.validate_config(cfg)
+
+
+@pytest.mark.parametrize("bad", [0, -4, "16GB", True])
+def test_weights_gb_must_be_a_positive_number(bad):
+    cfg = config_mod.load_config(None, validate=False)
+    cfg["weights_gb"] = bad
+    with pytest.raises(config_mod.ConfigError):
+        config_mod.validate_config(cfg)

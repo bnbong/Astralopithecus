@@ -2490,6 +2490,12 @@ out of memory가 났습니다. `vqa.jobs start` 는 job을 띄우자마자 곧�
 직접 읽으므로 파라미터 셀의 `MODEL_ID` 를 따로 고칠 필요가 없습니다. 절차와 예상 시간은
 `docs/colab_personal_account.md` 의 Qwen3.8-27B 비교 실험 절에 정리해 두었습니다.
 
+계통이 다른 모델의 확률을 얻어 27B 결과와 섞으려면 `CONFIG = INTERNVL_CONFIG` 라고 적고,
+`PROMPT_ID` 를 `"v2_read_text"` 로, `TRAIN_SCOPE` 를 `"fold0"` 으로 두십시오. InternVL3.5-8B는
+zero-shot 추론만 검증했으므로 학습 절은 건너뛰고 9번 절의 원본 추론만 돌립니다. 가중치가
+16GB뿐이라 5번 절의 VRAM 하한이 함께 내려가고, 24GB급 GPU에서도 bf16으로 들어갑니다.
+결합 방법은 docs/README_team.md 의 "InternVL3.5-8B 비교 실험" 절에 적어 두었습니다.
+
 `TRAIN_SCOPE` 는 학습에 쓰는 문항의 범위를 정합니다. 기본값인 `"fold0"` 은 fold 1~4의
 5,358문항만 학습하고 fold 0의 1,344문항을 검증으로 남겨 둡니다. 설정을 비교하고 학습 효과를
 판단하는 단계에서 쓰는 값입니다. `"full"` 로 바꾸면 fold 0까지 합친 6,690문항을 모두 학습하며,
@@ -2560,6 +2566,9 @@ MODEL_CACHE = "auto"
 MODEL_CACHE_NEED_GB = 60.0        # 27B 원본 스냅샷은 약 54GB입니다. 여유를 포함한 값입니다.
 # Qwen3.5와 Qwen3.8을 번갈아 돌리면 캐시에 54GB짜리 스냅샷이 두 벌, 모두 약 108GB가 쌓입니다.
 # 한 벌만 두고 싶다면 다 쓴 models--Qwen--Qwen3.5-27B 폴더를 직접 지우십시오.
+# InternVL3.5-8B 스냅샷은 약 16GB뿐입니다. 그 설정으로 돌릴 때에는 5번 절이 이 값을 설정
+# 파일의 weights_gb 로 다시 계산해 내립니다. 다만 캐시 위치(Drive냐 로컬 디스크냐)는 이
+# 값으로 먼저 고르므로, 처음부터 InternVL만 돌릴 생각이면 여기를 20.0 으로 적으십시오.
 
 # --- 모델과 프롬프트 ---
 # 아래 두 값은 5번 절에서 확정된 CONFIG 의 model_id 와 revision 으로 덮어씁니다. 여기 적힌
@@ -2577,6 +2586,11 @@ NF4_CONFIG = "configs/colab_qwen35_27b_nf4.yaml"
 UPSCALE_CONFIG = "configs/colab_qwen35_27b_bf16_upscale.yaml"   # 작은 이미지 확대본 (min_pixels 상향)
 # Qwen3.8-27B 비교 실험용 설정입니다. 해상도와 학습 설정은 위의 확대본과 같고 모델만 다릅니다.
 QWEN38_UPSCALE_CONFIG = "configs/colab_qwen38_27b_bf16_upscale.yaml"
+# InternVL3.5-8B 비교 실험용 설정입니다. 계통이 다른 모델의 확률을 얻어 27B 결과와 섞는 것이
+# 목적이므로 zero-shot 추론만 씁니다. 쓰려면 CONFIG = INTERNVL_CONFIG 라고 적고, PROMPT_ID 를
+# "v2_read_text" 로, TRAIN_SCOPE 를 "fold0" 으로 두십시오. 가중치가 16GB뿐이라 24GB급
+# GPU에서도 bf16 추론이 들어갑니다.
+INTERNVL_CONFIG = "configs/colab_internvl35_8b_bf16.yaml"
 CONFIG = ""                       # 비워 두면 아래 셀이 정책과 VRAM을 보고 정합니다. 직접 적으면 그 값을 씁니다.
 PROMPT_ID = "v1_image_only"       # 학습과 추론이 모두 이 프롬프트를 씁니다.
 
@@ -2831,20 +2845,43 @@ if _smi["rc"] == 0 and _smi["output"].strip():
 else:
     print("nvidia-smi를 쓸 수 없습니다. 런타임 유형이 GPU인지 확인하십시오.")
 
+# --- 설정 파일에서 가중치 크기를 읽습니다 ---
+# VRAM 하한을 27B의 54GB에 맞춰 고정해 두면, 가중치가 16GB뿐인 InternVL3.5-8B를 24GB GPU에서
+# bf16으로 돌릴 수 있는데도 이 셀이 nf4로 내려 버립니다. 그래서 하한 세 개를 모두 가중치
+# 크기에 비례하게 만듭니다. 기준값 54GB에서는 예전과 똑같은 20 / 35 / 70 이 나오므로 27B
+# 실행의 동작은 달라지지 않습니다.
+WEIGHTS_GB_REF = 54.0             # Qwen3.5-27B bf16 스냅샷 크기입니다.
+WEIGHTS_GB = WEIGHTS_GB_REF
+_peek_config = CONFIG or BF16_CONFIG
+if Path(_peek_config).exists():
+    from vqa import config as _weights_cfg_mod
+
+    _peeked = _weights_cfg_mod.get_path(_weights_cfg_mod.load_config(_peek_config), "weights_gb")
+    if _peeked:
+        WEIGHTS_GB = float(_peeked)
+_weights_scale = WEIGHTS_GB / WEIGHTS_GB_REF
+
+# 가중치가 작은 모델이면 캐시에 필요한 여유도 함께 내립니다. 위의 캐시 위치 선택은 27B
+# 기준으로 이미 끝났으므로, 여기서 내린 값은 5-1절의 내려받기 전 확인에만 쓰입니다.
+MODEL_CACHE_NEED_GB = min(MODEL_CACHE_NEED_GB, round(WEIGHTS_GB * 1.15 + 3.0, 1))
+
 # --- VRAM 하한을 먼저 확인합니다 ---
 # nf4로 양자화한 27B 가중치가 약 15GB이므로, 활성값과 KV 캐시까지 얹으려면 20GB는 있어야
 # 합니다. 이보다 작으면 추론조차 완주하지 못하므로 여기에서 멈춥니다.
-VRAM_MIN_INFER_GB = 20.0
-VRAM_MIN_TRAIN_GB = 35.0
-VRAM_BF16_GB = 70.0
+VRAM_MIN_INFER_GB = round(20.0 * _weights_scale, 1)
+VRAM_MIN_TRAIN_GB = round(35.0 * _weights_scale, 1)
+VRAM_BF16_GB = round(70.0 * _weights_scale, 1)
+print("가중치 %.0fGB 기준 VRAM 하한: 추론 %.1fGB / 학습 %.1fGB / bf16 %.1fGB"
+      % (WEIGHTS_GB, VRAM_MIN_INFER_GB, VRAM_MIN_TRAIN_GB, VRAM_BF16_GB))
 
 if VRAM_GB < VRAM_MIN_INFER_GB:
     raise RuntimeError(
-        "감지된 VRAM이 %.1fGB입니다. 27B는 nf4로 양자화해도 가중치만 약 15GB이므로, "
-        "%.0fGB 미만에서는 추론도 완주하지 못합니다. 런타임 유형이 GPU인지 먼저 확인하시고, "
-        "GPU가 맞다면 런타임을 끊고 다시 연결해서 더 큰 GPU를 받으십시오. 계속 작은 GPU만 "
-        "배정된다면 docs/README_team.md 의 9B 경로로 전환해야 합니다."
-        % (VRAM_GB, VRAM_MIN_INFER_GB)
+        "감지된 VRAM이 %.1fGB입니다. 이 설정의 가중치는 bf16으로 약 %.0fGB이고 nf4로 "
+        "양자화해도 약 %.0fGB이므로, %.1fGB 미만에서는 추론도 완주하지 못합니다. 런타임 "
+        "유형이 GPU인지 먼저 확인하시고, GPU가 맞다면 런타임을 끊고 다시 연결해서 더 큰 "
+        "GPU를 받으십시오. 계속 작은 GPU만 배정된다면 docs/README_team.md 의 9B 경로로 "
+        "전환해야 합니다."
+        % (VRAM_GB, WEIGHTS_GB, WEIGHTS_GB / 3.6, VRAM_MIN_INFER_GB)
     )
 
 # --- 정밀도를 정합니다 ---
@@ -2933,7 +2970,7 @@ if VRAM_GB < VRAM_MIN_TRAIN_GB:
     TRAINING_ALLOWED = False
     print("=" * 72)
     print("안내: VRAM이 %.1fGB이므로 이 가상 머신에서는 학습을 허용하지 않습니다." % VRAM_GB)
-    print("27B 학습은 nf4로 낮춰도 %.0fGB 이상이 필요합니다. 추론은 그대로 진행할 수 있습니다."
+    print("이 설정의 학습은 nf4로 낮춰도 %.1fGB 이상이 필요합니다. 추론은 그대로 진행할 수 있습니다."
           % VRAM_MIN_TRAIN_GB)
     print("=" * 72)
 
@@ -2942,7 +2979,7 @@ if VRAM_GB < VRAM_MIN_TRAIN_GB:
 if VRAM_GB < VRAM_BF16_GB and (UPSCALE or PRECISION == "bf16"):
     TRAINING_ALLOWED = False
     print("=" * 72)
-    print("경고: 설정 %s 는 VRAM이 70GB 이상일 때를 전제로 합니다." % CONFIG)
+    print("경고: 설정 %s 는 VRAM이 %.1fGB 이상일 때를 전제로 합니다." % (CONFIG, VRAM_BF16_GB))
     print("이 가상 머신의 VRAM은 %.1fGB뿐이므로 학습을 시작할 수도, 이어서 할 수도 없습니다." % VRAM_GB)
     if UPSCALE:
         print("확대본은 평균 시각 토큰이 1.46배여서 정밀도를 낮춰도 학습 활성값이 들어가지 않습니다.")
@@ -3126,10 +3163,10 @@ elif not DOWNLOAD_WEIGHTS:
 else:
     if CACHE_FREE_GB < MODEL_CACHE_NEED_GB:
         raise RuntimeError(
-            "캐시 위치 %s 의 여유가 %.1fGB뿐이라 약 54GB짜리 스냅샷이 들어가지 않습니다. "
+            "캐시 위치 %s 의 여유가 %.1fGB뿐이라 약 %.0fGB짜리 스냅샷이 들어가지 않습니다. "
             "파라미터 셀의 MODEL_CACHE 를 \"local\" 로 바꿔서 가상 머신 로컬 디스크에 받거나, "
             "Drive를 정리한 다음 5번 절부터 다시 실행하십시오."
-            % (MODEL_ROOT, CACHE_FREE_GB)
+            % (MODEL_ROOT, CACHE_FREE_GB, WEIGHTS_GB)
         )
     _hf_bin = shutil.which("hf") or shutil.which("huggingface-cli")
     if _hf_bin:

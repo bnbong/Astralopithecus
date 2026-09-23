@@ -73,6 +73,8 @@ HASH_EXCLUDED_KEYS: tuple[str, ...] = (
     "train.num_workers",
     "model_path",
     "attn_implementation",
+    # 가중치 크기는 노트북이 VRAM 하한을 정할 때 읽는 안내 값이다. 학습 결과를 바꾸지 않는다.
+    "weights_gb",
     # TF32는 속도 설정이다. 이 값 때문에 checkpoint 재개가 거부되면 안 된다.
     "runtime.tf32",
 )
@@ -222,6 +224,16 @@ def validate_config(config: Mapping[str, Any]) -> None:
     targets = get_path(config, "lora.targets")
     if not (targets == "auto" or isinstance(targets, list)):
         raise ConfigError("lora.targets는 'auto' 또는 모듈 이름 리스트여야 합니다.")
+    # processor_kwargs 와 weights_gb 는 선택 키다. DEFAULTS 에 넣지 않는 까닭은, 기본값이
+    # 생기면 이미 돌고 있는 27B run 들의 config_hash 까지 바뀌어 checkpoint 재개가 거부되기
+    # 때문이다. 그래서 설정 파일에 적혀 있을 때에만 형식을 본다.
+    processor_kwargs = get_path(config, "processor_kwargs")
+    if processor_kwargs is not None and not isinstance(processor_kwargs, Mapping):
+        raise ConfigError(f"processor_kwargs는 매핑이어야 합니다: {processor_kwargs!r}")
+    weights_gb = get_path(config, "weights_gb")
+    if weights_gb is not None:
+        if isinstance(weights_gb, bool) or not isinstance(weights_gb, (int, float)) or weights_gb <= 0:
+            raise ConfigError(f"weights_gb는 양수여야 합니다: {weights_gb!r}")
 
 
 def hashable_view(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -243,6 +255,9 @@ def config_hash(config: Mapping[str, Any]) -> str:
 RUN_ID_PREFIX_BY_MODEL: dict[str, str] = {
     "qwen3.5-27b": "colab27b",
     "qwen3.8-27b": "colab38_27b",
+    # InternVL3.5-8B는 27B와 계통이 다른 비교 실험용 모델이다. 예측이 27B run 폴더에 섞이면
+    # 결합할 때 어느 쪽 확률인지 구분할 수 없으므로 앞머리를 따로 둔다.
+    "internvl3_5-8b-hf": "internvl35_8b",
 }
 
 #: model_id 가 위 표에 없을 때 쓰는 접두사.

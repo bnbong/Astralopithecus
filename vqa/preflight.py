@@ -313,8 +313,12 @@ def check_pixel_limits(
         return CheckResult(
             "pixel_limits",
             WARN,
-            "image_processor에서 patch_size 또는 merge_size를 읽지 못해 기대 범위를 세울 수 없습니다.",
-            {"patch_size": patch_size, "merge_size": merge_size},
+            "image_processor에서 patch_size 또는 merge_size를 읽지 못해 기대 범위를 세울 수 "
+            "없습니다. InternVL처럼 448 타일 개수로 해상도를 정하는 processor가 여기에 "
+            "해당합니다. 그런 모델에서는 min/max_pixels가 아니라 설정의 processor_kwargs "
+            "(max_patches, min_patches)가 해상도를 정합니다.",
+            {"patch_size": patch_size, "merge_size": merge_size,
+             "image_processor_class": type(image_processor).__name__},
         )
     patch_size = int(patch_size)
     merge_size = int(merge_size)
@@ -384,7 +388,8 @@ def check_pixel_limits(
             return CheckResult(
                 "pixel_limits",
                 WARN,
-                "image_processor 결과에 image_grid_thw가 없어서 시각 토큰 수를 셀 수 없습니다.",
+                "image_processor 결과에 image_grid_thw가 없어서 시각 토큰 수를 셀 수 없습니다. "
+                "타일 방식 processor는 이 키 대신 num_patches를 돌려줍니다.",
                 detail,
             )
         detail[label]["visual_tokens"] = tokens

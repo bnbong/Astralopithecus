@@ -598,3 +598,28 @@ def test_pixel_limits_cli_sample_flag():
     assert args.pixel_sample == preflight_mod.DEFAULT_PIXEL_SAMPLE
     args = parser.parse_args(["--config", "configs/lab_qwen35_9b.yaml", "--pixel-sample", "10"])
     assert args.pixel_sample == 10
+
+
+def test_pixel_limits_warns_for_a_tile_based_processor(tmp_path):
+    """InternVL 스타일 processor다. image_grid_thw 도 patch_size 도 없다.
+
+    이런 모델에서 해상도를 정하는 것은 min/max_pixels 가 아니라 타일 개수이므로, 검사는
+    FAIL 로 전체를 막지 않고 WARN 으로 빠져야 한다.
+    """
+    records, data_root = make_pixel_fixture(tmp_path, [(2048, 1536), (320, 240)])
+
+    class InternVLStyleImageProcessor:
+        # patch_size / merge_size 속성 자체가 없다.
+        crop_to_patches = True
+        max_patches = 12
+        min_patches = 1
+
+        def __call__(self, images, return_tensors=None):  # noqa: ARG002
+            return {"pixel_values": [0] * 13, "num_patches": [13]}
+
+    result = preflight_mod.check_pixel_limits(
+        FakeProcessor(InternVLStyleImageProcessor()), PIXEL_CFG, records, data_root
+    )
+    assert result.status == preflight_mod.WARN
+    assert "processor_kwargs" in result.reason
+    assert result.detail["image_processor_class"] == "InternVLStyleImageProcessor"

@@ -265,3 +265,88 @@ def test_build_lora_model_wraps_only_language(tmp_path):
 
     counts = modeling.count_parameters(wrapped)
     assert 0 < counts["trainable"] < counts["total"]
+
+
+# --------------------------------------------------------------------------
+# processor_kwargs 전달
+# --------------------------------------------------------------------------
+
+
+class _RecordingAutoProcessor:
+    """from_pretrained 에 무엇이 넘어왔는지만 기록하는 가짜 AutoProcessor."""
+
+    calls: list[dict] = []
+
+    class _Processor:
+        def __init__(self):
+            self.tokenizer = type("T", (), {"padding_side": "left"})()
+
+    @classmethod
+    def from_pretrained(cls, src, **kwargs):
+        cls.calls.append({"src": src, **kwargs})
+        return cls._Processor()
+
+
+def _patch_auto_processor(monkeypatch):
+    import transformers
+
+    _RecordingAutoProcessor.calls = []
+    monkeypatch.setattr(transformers, "AutoProcessor", _RecordingAutoProcessor, raising=False)
+    return _RecordingAutoProcessor
+
+
+def test_processor_kwargs_are_passed_to_from_pretrained(monkeypatch):
+    recorder = _patch_auto_processor(monkeypatch)
+    cfg = {
+        "model_id": "OpenGVLab/InternVL3_5-8B-HF",
+        "min_pixels": 200704,
+        "max_pixels": 2609152,
+        "processor_kwargs": {"max_patches": 6, "min_patches": 1, "crop_to_patches": True},
+    }
+    modeling.load_processor(cfg)
+    call = recorder.calls[-1]
+    assert call["max_patches"] == 6
+    assert call["min_patches"] == 1
+    assert call["crop_to_patches"] is True
+    # 기존 키는 그대로 남는다. 받지 않는 processor는 TypeError 경로에서 걸러진다.
+    assert call["min_pixels"] == 200704
+
+
+def test_processor_kwargs_is_optional(monkeypatch):
+    recorder = _patch_auto_processor(monkeypatch)
+    modeling.load_processor({"model_id": "Qwen/Qwen3.5-27B", "min_pixels": 1, "max_pixels": 2})
+    call = recorder.calls[-1]
+    assert call["min_pixels"] == 1 and call["max_pixels"] == 2
+    assert "max_patches" not in call
+
+
+def test_processor_kwargs_override_the_pixel_budget(monkeypatch):
+    """같은 키를 적으면 설정 파일에 사람이 적은 값이 이긴다."""
+    recorder = _patch_auto_processor(monkeypatch)
+    modeling.load_processor(
+        {"model_id": "m", "min_pixels": 1, "max_pixels": 2, "processor_kwargs": {"max_pixels": 99}}
+    )
+    assert recorder.calls[-1]["max_pixels"] == 99
+
+
+def test_processor_kwargs_survive_the_typeerror_fallback(monkeypatch):
+    """min/max_pixels 를 받지 않는 processor 여도 타일 인자는 남아야 한다."""
+    import transformers
+
+    calls: list[dict] = []
+
+    class Picky:
+        @staticmethod
+        def from_pretrained(src, **kwargs):
+            calls.append(kwargs)
+            if "min_pixels" in kwargs:
+                raise TypeError("unexpected keyword argument 'min_pixels'")
+            return type("P", (), {"tokenizer": type("T", (), {"padding_side": "left"})()})()
+
+    monkeypatch.setattr(transformers, "AutoProcessor", Picky, raising=False)
+    modeling.load_processor(
+        {"model_id": "m", "min_pixels": 1, "max_pixels": 2, "processor_kwargs": {"max_patches": 6}}
+    )
+    assert len(calls) == 2
+    assert "min_pixels" not in calls[-1]
+    assert calls[-1]["max_patches"] == 6

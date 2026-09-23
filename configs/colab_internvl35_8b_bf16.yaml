@@ -1,0 +1,82 @@
+# Colab / transformers 5.x / InternVL3.5-8B-HF bf16 / 27B 결과와 결합하기 위한 비교 실험.
+#
+# 목적: 27B Qwen 계열과 계통이 다른 모델의 fold 0 확률을 얻어 scripts/blend_preds.py 로
+# 섞는 것이다. 계통이 다르면 틀리는 문항도 달라지므로, 단일 모델 정확도가 조금 낮아도
+# 결합에서는 올라갈 여지가 있다. 그래서 이 설정은 zero-shot 추론을 목표로 한다.
+#
+# 구조: HF API로 받은 config.json 의 architectures 는 InternVLForConditionalGeneration,
+# model_type 은 internvl 이다. 언어 backbone 은 Qwen3-8B(Qwen3ForCausalLM), 시각 쪽은
+# InternViT-300M 이다. 전체 모듈 이름을 meta device 에서 확인한 결과 최상위가
+# model.vision_tower / model.multi_modal_projector / model.language_model 이어서,
+# vqa/modeling.py 의 language_model 루트 탐색과 vision 경로 제외가 고치지 않아도 그대로
+# 맞는다. 실제로 LoRA target 252개를 찾고 vision 쪽 72개를 제외한다.
+#
+# 이미지 처리: Qwen 계열의 min_pixels / max_pixels 방식이 아니라 448x448 타일을 몇 장
+# 자를지로 해상도를 정한다(동적 타일링). 기본값은 preprocessor_config.json 의
+# max_patches=12, min_patches=1 이고, 여기에 축소 썸네일 한 장이 더 붙어서 이미지 한 장이
+# 타일 13장, 시각 토큰 13*256=3,328개가 된다. 이 값을 바꾸려면 아래 processor_kwargs 에
+# 적는다. 예를 들어 max_patches 를 6으로 내리면 타일 7장, 시각 토큰 1,792개가 된다.
+#
+# min_pixels / max_pixels: InternVL 의 GotOcr2ImageProcessor 는 이 두 인자를 받기는 하지만
+# 무시한다. 로컬 transformers 5.17.0 에서 두 값을 넣어 processor 를 만들고 같은 이미지를
+# 넣어 본 결과 타일 수가 달라지지 않았다. 설정 스키마가 두 키를 요구하므로 남겨 두되,
+# 이 모델에서 해상도를 실제로 바꾸는 것은 processor_kwargs 뿐이다. 그래서 preflight 의
+# pixel_limits 검사는 이 설정에서 WARN 으로 빠진다(image_grid_thw 가 없고 patch_size /
+# merge_size 속성도 없다). WARN 은 전체를 막지 않는다.
+#
+# thinking: chat_template.jinja 를 받아 확인한 결과 <think> 태그가 아예 없고 system turn 을
+# 요구하지도 않는다. 종료 토큰은 Qwen 과 같은 <|im_end|> 이고 assistant turn 꼬리는
+# "<|im_end|>\n" 이다. a/b/c/d 는 각각 단일 토큰(64/65/66/67)이며 generation prompt 꼬리
+# 뒤에 붙여도 병합되지 않는다. 로컬에서 processor 만 받아 직접 확인한 값이다.
+#
+# 가중치: bf16 safetensors 4개로 약 16GB 이다. 27B의 54GB 에 비하면 작아서 24GB 급
+# GPU 에서도 bf16 추론이 들어간다. 아래 weights_gb 가 21번 노트북의 VRAM 판단에 쓰인다.
+#
+# 라이선스: apache-2.0.
+#
+# 학습: 이 설정으로 LoRA 학습을 돌릴 수도 있지만 검증한 것은 zero-shot 추론뿐이다.
+# 학습을 하려면 preflight 를 모델까지 올려서 lora_targets 와 forward_backward 를 먼저
+# 통과시켜야 한다.
+model_id: OpenGVLab/InternVL3_5-8B-HF
+revision: 741a7d03020411e666c6109218ab71e08151ef86   # 2026-09-23 HF API로 조회한 main 브랜치 커밋
+model_path: null          # 오프라인이면 로컬 스냅샷 디렉터리를 여기에 적는다
+precision: bf16
+attn_implementation: sdpa
+
+# bf16 가중치 크기(GB). 21번 노트북이 VRAM 하한과 캐시 여유를 판단할 때 읽는다.
+weights_gb: 16
+
+# InternVL 의 이미지 타일링 인자. 비워 두면 preprocessor_config.json 의 기본값을 쓴다.
+# AutoProcessor.from_pretrained 에 그대로 넘어간다.
+processor_kwargs: {}
+
+# 이 모델에서는 쓰이지 않는다. 위 주석을 보라. 스키마를 맞추기 위한 값이다.
+min_pixels: 200704         # 448 * 448, 타일 한 장
+max_pixels: 2609152        # 448 * 448 * 13, 타일 12장 + 썸네일
+
+prompt_id: v2_read_text
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  targets: auto
+
+train:
+  lr: 1.0e-4
+  epochs: 1
+  micro_batch: 1
+  grad_accum: 8
+  warmup_ratio: 0.03
+  scheduler: linear
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  seed: 42
+  shuffle_options: true
+  save_every_steps: 50
+  save_every_minutes: 15
+  keep_last: 2
+
+infer:
+  batch_size: 1
+  save_every_items: 50

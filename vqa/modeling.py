@@ -88,7 +88,13 @@ def _dtype_kwarg(dtype: Any) -> dict[str, Any]:
 
 
 def load_processor(cfg: dict[str, Any], *, source: str | None = None) -> Any:
-    """AutoProcessor를 config의 pixel budget으로 로드한다."""
+    """AutoProcessor를 config의 pixel budget으로 로드한다.
+
+    설정에 `processor_kwargs` 매핑이 있으면 그 항목을 그대로 from_pretrained에 얹는다.
+    Qwen 계열은 min/max_pixels로 해상도를 정하지만, InternVL처럼 448 타일을 몇 장 자를지로
+    정하는 processor도 있기 때문이다(`max_patches`, `min_patches`, `crop_to_patches`).
+    min/max_pixels 다음에 얹으므로 같은 키를 적으면 processor_kwargs가 이긴다.
+    """
     from transformers import AutoProcessor
 
     src = source or config_mod.model_source(cfg)
@@ -96,6 +102,8 @@ def load_processor(cfg: dict[str, Any], *, source: str | None = None) -> Any:
         "min_pixels": int(config_mod.get_path(cfg, "min_pixels")),
         "max_pixels": int(config_mod.get_path(cfg, "max_pixels")),
     }
+    extra = config_mod.get_path(cfg, "processor_kwargs") or {}
+    kwargs.update(dict(extra))
     revision = config_mod.get_path(cfg, "revision")
     if revision:
         kwargs["revision"] = revision
@@ -105,7 +113,8 @@ def load_processor(cfg: dict[str, Any], *, source: str | None = None) -> Any:
     try:
         processor = AutoProcessor.from_pretrained(src, **kwargs)
     except TypeError:
-        # min/max_pixels를 받지 않는 processor도 있다.
+        # min/max_pixels를 받지 않는 processor도 있다. processor_kwargs는 설정 파일에 사람이
+        # 적어 넣은 값이므로 지우지 않는다. 그 키가 틀렸다면 그대로 오류가 나야 한다.
         kwargs.pop("min_pixels", None)
         kwargs.pop("max_pixels", None)
         processor = AutoProcessor.from_pretrained(src, **kwargs)

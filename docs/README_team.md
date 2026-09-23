@@ -363,3 +363,72 @@ GPU를 쓰는 작업은 한 번에 하나만 돌립니다. `vqa.jobs start`는 �
 노트북 21번은 파라미터 셀 하나에서 모든 선택을 끝낸 다음 위에서 아래로 한 번에 실행하도록
 만들었습니다. GPU 단계는 job을 띄운 뒤 `vqa.jobs wait`로 기다리므로 "모두 실행"을 눌러도 작업이
 겹치지 않습니다. 다만 학습만은 열 시간 안팎이 걸리기 때문에 띄우기만 하고 기다리지 않습니다.
+
+## 13. InternVL3.5-8B 비교 실험
+
+27B 예측과 섞을 확률을 하나 더 얻으려고 계통이 다른 모델을 하나 붙였습니다.
+`OpenGVLab/InternVL3_5-8B-HF` 는 InternViT-300M 시각 인코더에 Qwen3-8B 언어 모델을 얹은
+구조이고, transformers 에 정식으로 이식되어 있어서 `AutoProcessor` 와
+`AutoModelForImageTextToText` 로 그대로 불러옵니다. 라이선스는 apache-2.0 입니다. 이 실험에서
+검증한 범위는 zero-shot 추론까지이며, LoRA 학습은 아직 확인하지 않았습니다.
+
+### 노트북 21번에서 바꿀 파라미터
+
+파라미터 셀에서 다음 세 값만 바꾸면 됩니다.
+
+```
+CONFIG = INTERNVL_CONFIG        # configs/colab_internvl35_8b_bf16.yaml
+PROMPT_ID = "v2_read_text"
+TRAIN_SCOPE = "fold0"
+```
+
+run-id 의 앞머리는 5번 절이 설정 파일의 `model_id` 를 보고 `colab27b` 에서 `internvl35_8b` 로
+바꿉니다. 프롬프트 접미사까지 붙으면 원본 추론의 run-id 는
+`internvl35_8b_base_bf16_v2_read_text` 가 됩니다. 27B 예측이 쌓인 폴더와 이름이 겹치지 않으므로
+두 모델의 결과가 한 폴더에서 섞일 염려는 없습니다.
+
+가중치는 bf16 safetensors 네 개로 약 16GB 입니다. 27B 의 54GB 에 견주면 작기 때문에, 5번 절이
+설정 파일의 `weights_gb` 를 읽어서 VRAM 하한을 함께 내립니다. 그 결과 40GB 가상 머신은 물론이고
+24GB 가상 머신에서도 bf16 으로 추론할 수 있습니다. 처음부터 이 모델만 돌릴 계획이라면 파라미터
+셀의 `MODEL_CACHE_NEED_GB` 를 `20.0` 으로 낮춰서 Drive 캐시를 쓰도록 하십시오.
+
+학습 절은 건너뛰고 9번 절의 원본 추론만 돌리면 됩니다. fold 0 의 1,344 문항을 추론하는 데에는
+A100 기준으로 20분에서 30분 사이가 걸릴 것으로 예상합니다. 이미지 한 장이 448 타일 13장, 즉 시각
+토큰 3,328 개로 펼쳐지기 때문에, 27B 의 기본 해상도보다 토큰 수가 많다는 점을 감안한 값입니다.
+타일 수를 줄이려면 설정 파일의 `processor_kwargs` 에 `max_patches: 6` 을 적으십시오.
+
+### preflight 에서 확인할 항목
+
+`--skip-model` 을 붙이지 않고 돌리되, 학습 관련 검사가 실패하더라도 추론만 할 것이라면 그대로
+진행해도 됩니다. 반드시 통과해야 하는 항목은 다음 네 가지입니다.
+
+- `choice_single_token` 은 PASS 여야 합니다. a, b, c, d 가 각각 토큰 하나로 인코딩되며 실제 id 는
+  64, 65, 66, 67 입니다.
+- `chat_template_tail` 은 PASS 여야 합니다. 이 모델의 chat template 에는 `<think>` 태그가 아예
+  없고 system turn 을 요구하지도 않으므로, thinking 이 켜진 채로 나갈 위험은 없습니다.
+- `choice_token_after_tail` 은 PASS 여야 합니다. generation prompt 의 꼬리인
+  `<|im_start|>assistant\n` 뒤에 letter 를 붙여도 토큰이 병합되지 않는다는 것을 로컬에서 미리
+  확인했습니다.
+- `pixel_limits` 는 WARN 으로 빠집니다. InternVL 의 image processor 는 `image_grid_thw` 를
+  돌려주지 않고 `patch_size` 와 `merge_size` 속성도 가지고 있지 않아서, 시각 토큰 수를 세는 방식
+  자체가 맞지 않기 때문입니다. WARN 은 preflight 전체를 막지 않으므로 그대로 진행하면 됩니다.
+  이 모델에서 해상도를 실제로 정하는 값은 `min_pixels` 와 `max_pixels` 가 아니라 위에서 설명한
+  `processor_kwargs` 입니다.
+
+`kernel_fast_path` 는 선형 어텐션을 쓰지 않는 구조이므로 이 모델과 무관합니다.
+
+### 27B 예측과 결합하는 방법
+
+fold 0 예측이 나오면 27B 결과와 가중 평균을 냅니다. 27B 쪽에 0.8 을 주는 까닭은, 단일 모델
+정확도가 27B 쪽이 확실히 높기 때문에 보조 모델을 적게 섞어야 손해를 보지 않기 때문입니다.
+
+```
+python scripts/blend_preds.py \
+    --a <RUN_ROOT>/colab27b_base_bf16/preds/fold0_base.csv \
+    --b <RUN_ROOT>/internvl35_8b_base_bf16_v2_read_text/preds/fold0_base.csv \
+    --w-a 0.8 --labels train.csv --out-probs blend_internvl_fold0_probs.csv
+```
+
+가중치는 fold 0 에서 세밀하게 고르지 말고 미리 정한 값을 쓰십시오. 검증 분할 하나에 맞춰
+가중치를 고르면 그 분할에만 맞는 값이 나옵니다. 결합한 정확도가 27B 단독 정확도보다 낮게
+나온다면 그 결합은 버리고 27B 예측을 그대로 제출하면 됩니다.
