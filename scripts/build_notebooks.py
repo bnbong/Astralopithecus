@@ -2667,6 +2667,15 @@ TRAIN_SCOPE = "fold0"
 # 않습니다. 그 분할 파일은 `python scripts/folds_to_split.py --scope fold --val-fold N` 으로
 # 미리 만들어 두어야 합니다(artifacts/data/train_folds.csv 를 읽습니다).
 VAL_FOLD = 0
+# WITH_DEV 를 True로 바꾸면 대회가 배포한 dev 세트 2,024문항을 학습에 더합니다. 라벨은 팀원이
+# dev.csv의 answer1~5를 다수결로 모은 fold_csv_files/dev_aux.csv 입니다. 이때 6번 절이
+# train.csv와 dev 행을 합친 train_plus_dev.csv 를 만들고, 5번 절이 분할 파일을 "_dev" 판으로
+# 바꾸며, 13번 절의 학습 명령에 --train-csv 가 붙고 run-id 뒤에 "_dev" 가 붙습니다. 검증 목록은
+# 그대로여서 15번 절의 fold 검증은 dev를 넣기 전과 같은 문항으로 잽니다.
+# "_dev" 분할 파일은 `python scripts/folds_to_split.py --scope fold --val-fold N
+# --with-dev fold_csv_files/dev_aux.csv` 로 미리 만들어 두어야 합니다.
+WITH_DEV = False
+DEV_AUX_CSV = "fold_csv_files/dev_aux.csv"   # dev 다수결 정답 (id, answer_majority)
 SPLIT_FILE_FOLD0 = "artifacts/data/split_fold0.json"  # 팀 공식 학습 분할 (train_fold1234, 5,358문항)
 SPLIT_FILE_FULL = "artifacts/data/split_full.json"    # fold 0까지 합친 전체 (6,690문항)
 VAL_IDS_FILE = "fold_csv_files/val_fold0.csv"      # 팀 공식 검증 분할 (fold 0, 1,344문항)
@@ -3083,21 +3092,41 @@ elif TRAIN_SCOPE == "full":
     SPLIT_FILE, SCOPE_SUFFIX = SPLIT_FILE_FULL, "_full"
 else:
     raise RuntimeError("TRAIN_SCOPE 는 fold0 또는 full 이어야 합니다: %r" % (TRAIN_SCOPE,))
+
+# 검증 id는 언제나 train.csv 안의 문항입니다. dev를 학습에 더하더라도 이 목록은 바뀌지 않으므로
+# 검증 id를 꺼내 올 분할 파일은 "_dev" 가 붙지 않은 원래 파일을 씁니다.
+BASE_SPLIT_FILE = SPLIT_FILE
+# dev를 더한 판으로 갈아탑니다. 학습 CSV도 함께 바뀌어야 합니다. train.csv에는 dev 행이 없어서
+# vqa.train 이 split의 dev id를 찾지 못하고 멈추기 때문입니다.
+if WITH_DEV:
+    SPLIT_FILE = SPLIT_FILE[: -len(".json")] + "_dev.json"
+    DEV_SUFFIX = "_dev"
+    TRAIN_CSV_NAME = "train_plus_dev.csv"
+else:
+    DEV_SUFFIX = ""
+    TRAIN_CSV_NAME = "train.csv"
+
 if not Path(SPLIT_FILE).exists():
     raise RuntimeError(
         "분할 파일이 없습니다: %s\n"
         "`python scripts/folds_to_split.py` 를 먼저 실행하십시오. fold 0이 아닌 fold를 쓰려면 "
-        "`--scope fold --val-fold %d --folds-csv <전체 fold 배정 CSV>` 가 필요합니다."
-        % (SPLIT_FILE, VAL_FOLD))
+        "`--scope fold --val-fold %d --folds-csv <전체 fold 배정 CSV>` 가 필요하고, "
+        "WITH_DEV 가 True이면 그 명령에 `--with-dev %s` 를 함께 붙여야 합니다."
+        % (SPLIT_FILE, VAL_FOLD, DEV_AUX_CSV))
+if WITH_DEV:
+    _dev_payload = json.loads(Path(SPLIT_FILE).read_text(encoding="utf-8"))
+    print("dev 추가 학습: %s (학습 %d문항, 그 가운데 dev %d문항)"
+          % (SPLIT_FILE, _dev_payload.get("n_train", 0), _dev_payload.get("dev_added", 0)))
+    print("학습 CSV     : %s (6번 절이 만듭니다)" % TRAIN_CSV_NAME)
 
 # 검증 id 목록입니다. fold 0은 팀이 준 CSV를 그대로 쓰고, 다른 fold는 분할 파일의 val_ids 를
 # 꺼내어 같은 형식의 CSV로 한 번 써 둡니다. vqa.predict --ids-file 과 evaluate_run.py
 # --val-ids 가 모두 'id' 컬럼 하나짜리 CSV를 읽기 때문입니다.
 if TRAIN_SCOPE == "fold0" and VAL_FOLD != 0:
-    _split_payload = json.loads(Path(SPLIT_FILE).read_text(encoding="utf-8"))
+    _split_payload = json.loads(Path(BASE_SPLIT_FILE).read_text(encoding="utf-8"))
     _val_ids = [str(i) for i in _split_payload.get("val_ids") or []]
     if not _val_ids:
-        raise RuntimeError("%s 에 val_ids 가 없습니다." % SPLIT_FILE)
+        raise RuntimeError("%s 에 val_ids 가 없습니다." % BASE_SPLIT_FILE)
     VAL_IDS_FILE = "artifacts/data/val_fold%d_ids.csv" % VAL_FOLD
     Path(VAL_IDS_FILE).parent.mkdir(parents=True, exist_ok=True)
     Path(VAL_IDS_FILE).write_text("id\n" + "\n".join(sorted(_val_ids)) + "\n", encoding="utf-8")
@@ -3140,8 +3169,9 @@ def resolve_run_id(stem, prompt_id=None, res_suffix=None):
 
 BASE_RUN = resolve_run_id(BASE_RUN_ID)
 # 학습 범위 접미사는 기본 이름에 먼저 붙입니다. 그래야 전체 데이터로 학습한 결과가 fold 0으로
-# 학습한 기존 run 폴더에 섞이지 않습니다.
-FT_RUN = resolve_run_id(FT_RUN_ID + SCOPE_SUFFIX)
+# 학습한 기존 run 폴더에 섞이지 않습니다. dev 접미사는 그 뒤, 프롬프트 앞에 옵니다. 최종
+# 순서는 기본이름 + scope/fold + _dev + 프롬프트 + 해상도 + 정밀도 입니다.
+FT_RUN = resolve_run_id(FT_RUN_ID + SCOPE_SUFFIX + DEV_SUFFIX)
 CMP_RUN = resolve_run_id(BASE_RUN_ID, COMPARE_PROMPT_ID)
 
 # 해상도 비교(10-1절)에 쓰는 run-id입니다. 프롬프트와 정밀도는 9번 절과 같게 두고 해상도만
@@ -3326,6 +3356,11 @@ print("캐시 여유 공간 : %.1fGB" % _free_gb(MODEL_ROOT))
 
 압축 파일을 로컬 디스크에 풉니다. 이미 풀려 있으면 아무 일도 하지 않습니다. 압축 파일에
 암호가 없다면 파라미터 셀의 `ARCHIVE_PASSWORD` 에 `none` 이라고 적으십시오.
+
+`WITH_DEV` 가 True이면 압축을 푼 다음에 `scripts/make_dev_train_csv.py` 를 한 번 더 실행해서
+`train.csv` 6,714행과 dev 2,024행을 합친 `train_plus_dev.csv` 8,738행을 만듭니다. dev 행의
+`path` 는 `dev/dev_0001.jpg` 형태여서 이미지도 같은 폴더에서 그대로 읽힙니다. 이 파일은 질문
+원문과 정답을 담고 있어 저장소에 올리지 않으며, `.gitignore` 가 이름으로 막고 있습니다.
 """))
 
     cells.append(code(DATA_STAGE + r'''
@@ -3334,6 +3369,18 @@ for name in ("train", "test", "dev"):
     p = data_root / name
     print("%-8s 이미지 %d장" % (name, len(list(p.glob("*.jpg"))) if p.is_dir() else 0))
 print("VQA_DATA_ROOT:", os.environ["VQA_DATA_ROOT"])
+
+# --- dev를 학습에 더할 때에만 학습 CSV를 하나 더 만듭니다 ---
+if WITH_DEV:
+    if not Path(DEV_AUX_CSV).exists():
+        raise RuntimeError(
+            "dev 다수결 정답 파일이 없습니다: %s\n"
+            "저장소에 들어 있는 파일이므로 3번 절의 코드 받기가 끝났는지 확인하십시오." % DEV_AUX_CSV)
+    run([PY, "scripts/make_dev_train_csv.py",
+         "--data-root", DATA_ROOT,
+         "--dev-aux", DEV_AUX_CSV,
+         "--expect-rows", "8738"])
+    print("학습 CSV:", data_root / TRAIN_CSV_NAME)
 '''))
 
     cells.append(md("""
@@ -3917,8 +3964,13 @@ run-id 아래에 bf16 checkpoint와 nf4 checkpoint가 섞이면 이어서 하는
 때문입니다.
 
 학습에 쓰는 분할은 파라미터 셀의 `TRAIN_SCOPE` 가 정합니다. `fold0` 이면 5,358문항을,
-`full` 이면 6,690문항을 학습하므로 전체 step 수도 그만큼 늘어납니다. 5번 절의 출력에서 학습
+`full` 이면 6,690문항을 학습하므로 전체 step 수도 그만큼 늘어납니다. `WITH_DEV` 가 True이면
+여기에 dev 2,024문항이 더 붙어서 fold 0 기준 7,382문항이 됩니다. 5번 절의 출력에서 학습
 범위와 분할 파일을 한 번 더 확인하신 다음에 이 셀을 실행하십시오.
+
+학습 CSV는 `TRAIN_CSV_NAME` 이 정합니다. 기본값은 `train.csv` 이고, `WITH_DEV` 가 True이면
+6번 절이 만든 `train_plus_dev.csv` 입니다. 분할 파일과 학습 CSV는 반드시 짝이 맞아야 합니다.
+`_dev` 분할을 `train.csv` 와 함께 넘기면 `vqa.train` 이 dev id를 찾지 못하고 멈춥니다.
 """))
 
     cells.append(code(r'''
@@ -3944,7 +3996,8 @@ if _manifest_path.exists():
 
 cmd = [PY, "-m", "vqa.train",
        "--config", CONFIG, "--run-id", FT_RUN,
-       "--split", SPLIT_FILE, "--resume", "auto"] + OVERRIDES
+       "--split", SPLIT_FILE, "--train-csv", TRAIN_CSV_NAME,
+       "--resume", "auto"] + OVERRIDES
 gpu_step(FT_RUN + "_train", cmd, wait=False)
 '''))
 

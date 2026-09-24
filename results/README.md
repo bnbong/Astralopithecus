@@ -214,3 +214,42 @@ TTA(TTA4)를 fold 0에 적용하니 정확도가 0.9688에서 0.9710(1305/1344)�
 선택은 ⑩(0.97110)과 ⑦(0.96931) 그대로 유지하기로 했습니다. 같은 날 InternVL LoRA를 A나
 A_tta4와 fold 0에서 결합해 보아도 가장 좋은 조합(A_tta4 0.8 + InternVL 0.2)이 0.9717로
 A_tta4보다 1문항 나은 수준에 그쳐, 이 조합은 test 추론까지 진행하지 않기로 했습니다.
+
+## 2026-09-24 추가 실험: 3-epoch, Qwen3-VL-32B, TTA 최종 결과
+
+**3-epoch 학습(기각)**: `configs/colab_qwen35_27b_bf16_upscale_3ep.yaml`은 A 설정에서
+`train.epochs`만 1에서 3으로 올리고, epoch마다 adapter를 남기도록
+`train.keep_epoch_adapters`를 켜고 세 epoch을 모두 보존하도록 `train.keep_last`를 3으로
+바꾼 설정입니다. run-id `colab27b_ft_bf16_3ep_v2_read_text_upscale`로 2,010 step을 개인
+Colab A100 80GB에서 2026-09-23 밤부터 24일 아침까지 돌렸습니다. fold 0 정확도는 epoch 1
+adapter가 0.9628(1294/1344), epoch 2가 0.9635(1295/1344), epoch 3이 0.9665(1299/1344)로
+epoch이 늘수록 올랐지만, 세 값 모두 1 epoch만 단독으로 학습한 A(0.9688, 1302/1344)에는
+미치지 못했습니다. 오답의 평균 margin도 epoch 1의 0.54에서 epoch 2의 0.85, epoch 3의
+0.87로 계속 커져서, 더 학습할수록 정답을 더 맞히기보다는 틀린 답에 과신만 쌓였습니다.
+"더 오래 학습하면 채점자 관습을 더 배운다"는 가설은 성립하지 않았으므로 epoch 1 설정을
+유지합니다. 다만 3-epoch 스케줄 안의 epoch 1 adapter는 학습률 스케줄이 아직 3 epoch
+기준으로 높게 남아 있는 중간 상태이므로, 단독 1-epoch 실행(A)과 완전히 같은 조건은
+아니라는 점도 함께 밝혀 둡니다.
+
+**Qwen3-VL-32B-Instruct zero-shot(기각)**: `configs/colab_qwen3vl_32b_bf16_upscale.yaml`로
+확대 해상도와 p2 프롬프트를 유지한 채 32B 모델을 zero-shot으로 돌렸습니다. preflight는
+전 항목 PASS였고 `pixel_limits`만 WARN(1700×720 이미지가 1,166토큰)이었습니다. 문항당
+추론은 0.62초였고 fold 0 정확도는 0.9576(1287/1344)으로, 확대 zero-shot 관문 값(⑥,
+0.9635)에 미달했습니다. A(⑦, 0.9688)와 대조하면 A만 맞힌 문항이 31개, 32B만 맞힌
+문항이 16개, 둘 다 틀린 문항이 26개였습니다. A를 0.9·0.8·0.7·0.5로 낮추고 32B를 섞는
+결합도 순증가가 각각 0, -1, -1, -12문항으로 이득이 없었습니다. 오답의 평균 margin이
+0.876으로 과신이 심해 확률 결합에서 특히 불리했습니다. 실행본은
+`results/21_colab_qwen3vl_32b_run_20260923_A100-80GB_bf16_upscale_v2_read_text.ipynb`에
+보관되어 있습니다.
+
+**TTA 최종 결과(완전히 기각)**: A_tta4와 ⑧에도 같은 TTA4를 적용한 B_tta4를 결합한 값
+(A_tta4 + B_tta4)의 Public 점수는 0.96991로(제출 파일 sha256
+`f07a2626c1750d6a73d8554db93d00f9c42062d80fd25fc1b4d42ebd3443ec83`), ⑩(⑦ + ⑧ 결합,
+0.97110)보다 낮았습니다. TTA를 단독으로 쓰든(A_tta4, 0.96931), 한쪽에만 쓰든(A_tta4 +
+B, 0.97050), 양쪽에 다 쓰든(A_tta4 + B_tta4, 0.96991) 세 조합 모두 ⑩보다 낮았으므로,
+선택지 순열 TTA는 결합 여부와 상관없이 완전히 기각합니다.
+
+**진행 중인 실험**: 5-fold 배깅(A 설정을 `artifacts/data/split_fold1.json`부터
+`split_fold4.json`까지 네 분할 각각에서 검증셋으로 학습, run-id
+`colab27b_ft_bf16_fold{N}_v2_read_text_upscale`)은 fold 1~4를 각각 학습 중이며, 결과는
+`[확인 필요]`입니다.

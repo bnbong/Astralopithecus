@@ -722,7 +722,16 @@ def build_parser() -> argparse.ArgumentParser:
     config_mod.add_config_arguments(parser)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--split", default=None, help="artifacts/data/split_v1.json")
-    parser.add_argument("--csv", default=None, help="학습 CSV. 기본값은 DATA_ROOT/train.csv")
+    parser.add_argument(
+        "--csv",
+        "--train-csv",
+        dest="csv",
+        default=None,
+        help=(
+            "학습 CSV. 기본값은 DATA_ROOT/train.csv 이며 DATA_ROOT 기준 상대 경로도 받는다. "
+            "dev를 더한 분할로 학습할 때에는 train_plus_dev.csv 를 넘긴다."
+        ),
+    )
     parser.add_argument("--resume", default="auto", help="auto | none | <checkpoint 경로>")
     parser.add_argument("--force-resume", action="store_true", help="config/split 해시가 달라도 재개")
     parser.add_argument("--max-steps", type=int, default=None)
@@ -749,14 +758,30 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from . import collator as collator_mod
 
-    csv_path = Path(args.csv) if args.csv else data_root / "train.csv"
+    # split의 train_ids가 dev_ 로 시작하는 id를 담고 있으면 그 행이 있는 CSV를 받아야 한다.
+    # 파일 이름만 넘겨도 되도록 DATA_ROOT 아래를 한 번 더 본다. vqa.predict --csv 와 같은 규칙이다.
+    if args.csv:
+        csv_path = Path(args.csv)
+        if not csv_path.exists():
+            csv_path = data_root / args.csv
+    else:
+        csv_path = data_root / "train.csv"
+    if not csv_path.exists():
+        raise SystemExit(f"학습 CSV를 찾지 못했습니다: {args.csv or csv_path}")
     records = collator_mod.load_records(csv_path, data_root=data_root)
     train_ids, split_hash = load_split_ids(args.split, records)
 
     by_id = {r.id: r for r in records}
     missing = [i for i in train_ids if i not in by_id]
     if missing:
-        raise SystemExit(f"split에 있는 id {len(missing)}개가 CSV에 없습니다: {missing[:5]}")
+        hint = ""
+        if any(str(i).startswith("dev_") for i in missing):
+            hint = (
+                f"\n{csv_path.name} 에 dev 행이 없습니다. "
+                "`python scripts/make_dev_train_csv.py --data-root <DATA_ROOT>` 로 "
+                "train_plus_dev.csv 를 만든 다음 --train-csv train_plus_dev.csv 로 넘기십시오."
+            )
+        raise SystemExit(f"split에 있는 id {len(missing)}개가 CSV에 없습니다: {missing[:5]}{hint}")
     train_ids = [i for i in train_ids if by_id[i].answer_idx is not None]
     if args.limit_train:
         train_ids = train_ids[: args.limit_train]

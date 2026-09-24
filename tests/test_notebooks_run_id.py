@@ -186,3 +186,83 @@ def test_notebook_parameter_cell_offers_val_fold_and_epoch_adapter():
     # epoch adapter는 final_adapter 자리에 그대로 들어간다.
     assert '"epoch_adapters"' in source
     assert 'EPOCH_SUFFIX = "_epoch%d" % EPOCH_NUMBER' in source
+
+
+# --------------------------------------------------------------------------
+# WITH_DEV (대회 배포 dev를 학습에 더하는 경로)
+# --------------------------------------------------------------------------
+
+
+def derive_run_ids_with_dev(config_path, prompt_id="v1_image_only", train_scope="fold0",
+                            val_fold=0, with_dev=False, precision_suffix="",
+                            ft_stem="colab27b_ft_bf16"):
+    """21번 노트북 5번 절의 run-id 규칙 가운데 학습 run만 옮겨 적은 것이다.
+
+    접미사 순서는 기본이름 + scope/fold + _dev + 프롬프트 + 해상도 + 정밀도 다.
+    """
+    cfg = config_mod.load_config(ROOT / config_path)
+    prefix = config_mod.run_id_prefix(config_mod.get_path(cfg, "model_id"))
+    default = config_mod.DEFAULT_RUN_ID_PREFIX
+    if prefix != default and ft_stem.startswith(default):
+        ft_stem = prefix + ft_stem[len(default):]
+
+    if train_scope == "full":
+        scope_suffix = "_full"
+    elif val_fold != 0:
+        scope_suffix = "_fold%d" % val_fold
+    else:
+        scope_suffix = ""
+    dev_suffix = "_dev" if with_dev else ""
+    prompt_suffix = "" if prompt_id == "v1_image_only" else "_" + prompt_id
+    res_suffix = "_upscale" if "upscale" in Path(config_path).stem else ""
+    return ft_stem + scope_suffix + dev_suffix + prompt_suffix + res_suffix + precision_suffix
+
+
+def test_dev_suffix_sits_between_the_scope_and_the_prompt():
+    assert derive_run_ids_with_dev(BF16_CONFIG, with_dev=True) == "colab27b_ft_bf16_dev"
+    assert derive_run_ids_with_dev(
+        UPSCALE_CONFIG, prompt_id="v2_read_text", val_fold=3, with_dev=True
+    ) == "colab27b_ft_bf16_fold3_dev_v2_read_text_upscale"
+    assert derive_run_ids_with_dev(
+        BF16_CONFIG, train_scope="full", with_dev=True
+    ) == "colab27b_ft_bf16_full_dev"
+
+
+def test_dev_run_ids_never_collide_with_the_runs_without_dev():
+    """dev를 더한 run이 기존 run 폴더를 덮어쓰면 checkpoint가 섞인다."""
+    for scope, fold in (("fold0", 0), ("fold0", 2), ("full", 0)):
+        without = derive_run_ids_with_dev(BF16_CONFIG, train_scope=scope, val_fold=fold)
+        with_dev = derive_run_ids_with_dev(
+            BF16_CONFIG, train_scope=scope, val_fold=fold, with_dev=True
+        )
+        assert without != with_dev
+        assert with_dev == without + "_dev"
+
+
+def test_with_dev_is_off_by_default():
+    source = notebook_source()
+    assert "WITH_DEV = False" in source
+    assert 'DEV_AUX_CSV = "fold_csv_files/dev_aux.csv"' in source
+
+
+def test_notebook_switches_the_split_and_the_csv_together():
+    """분할과 학습 CSV는 짝이 맞아야 한다. _dev 분할을 train.csv로 학습할 수 없다."""
+    source = notebook_source()
+    assert 'SPLIT_FILE = SPLIT_FILE[: -len(".json")] + "_dev.json"' in source
+    assert 'TRAIN_CSV_NAME = "train_plus_dev.csv"' in source
+    assert 'TRAIN_CSV_NAME = "train.csv"' in source
+    assert 'DEV_SUFFIX = "_dev"' in source
+    assert "FT_RUN = resolve_run_id(FT_RUN_ID + SCOPE_SUFFIX + DEV_SUFFIX)" in source
+    # 학습 명령이 그 CSV를 받는다.
+    assert '"--split", SPLIT_FILE, "--train-csv", TRAIN_CSV_NAME,' in source
+    # 6번 절이 그 CSV를 만든다.
+    assert '[PY, "scripts/make_dev_train_csv.py",' in source
+    assert '"--expect-rows", "8738"' in source
+
+
+def test_validation_inference_still_reads_train_csv():
+    """검증 fold는 train.csv 안의 문항이다. dev를 더해도 추론 대상은 그대로여야 한다."""
+    source = notebook_source()
+    assert '"--csv", "train.csv", "--ids-file", VAL_IDS_FILE,' in source
+    # 검증 id는 _dev 판이 아니라 원래 분할 파일에서 읽는다.
+    assert '_split_payload = json.loads(Path(BASE_SPLIT_FILE).read_text(encoding="utf-8"))' in source

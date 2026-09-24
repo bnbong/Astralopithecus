@@ -11,6 +11,8 @@
 /sample_submission.csv
 /image.png
 /data/
+# scripts/make_dev_train_csv.py 가 만드는 학습 CSV. 질문 원문과 정답이 들어 있다.
+train_plus_dev.csv
 
 # 데이터 압축본
 *.zip

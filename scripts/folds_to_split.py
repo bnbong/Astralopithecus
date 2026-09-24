@@ -42,6 +42,22 @@ fold 분할에도 test 중복 제외 정책을 그대로 적용한다. 제외 �
     python scripts/folds_to_split.py                # 두 분할을 모두 만든다
     python scripts/folds_to_split.py --scope full   # split_full.json만 만든다
     python scripts/folds_to_split.py --scope fold --val-fold 2   # split_fold2.json을 만든다
+
+`--with-dev fold_csv_files/dev_aux.csv` 를 붙이면 위의 파일을 그대로 만든 다음에, 학습 목록
+뒤에 대회 배포 dev 세트의 id를 이어 붙인 판을 하나 더 쓴다. 이름은 원래 이름에 `_dev` 를 붙인
+`split_fold0_dev.json`, `split_full_dev.json` 이다. 검증 목록은 건드리지 않으므로 fold 검증
+점수는 dev를 넣기 전과 같은 문항으로 잰다. 몇 문항을 더했는지는 `dev_added` 에 적는다.
+
+dev에도 test 중복 제외 정책을 그대로 적용한다. `fold_csv_files/exclude_dev_overlap_test.csv`
+에는 이미지가 test와 완전히 같은 dev 4문항이 들어 있고, `--with-dev` 가 이 파일을 기본으로
+읽어 학습 목록에서 뺀다. 뺀 개수와 id는 `dev_excluded_overlap_test` 와
+`dev_excluded_overlap_test_ids` 에 적는다. 이 목록은 `--dev-exclude-csv` 로 바꿀 수 있다.
+`train_plus_dev.csv` 에는 그 4문항이 그대로 남아 있지만, 학습에 쓰이는 문항은 split의
+`train_ids` 가 정하므로 목록에 없으면 학습되지 않는다.
+
+dev id는 `dev_0001.jpg` 형태여서 train id와 겹치지 않는다. 이 분할로 학습하려면
+`scripts/make_dev_train_csv.py` 가 만드는 `train_plus_dev.csv` 를 `vqa.train --train-csv` 로
+함께 넘겨야 한다. train.csv에는 dev 행이 없기 때문이다.
 """
 
 from __future__ import annotations
@@ -76,6 +92,19 @@ N_FOLDS = 5
 #: 둘째는 fold_csv_files 아래에 직접 둔 파일이다.
 DEFAULT_FOLDS_CSV = "folds_all.csv"
 DEFAULT_FOLDS_CSV_IN_ARTIFACTS = "train_folds.csv"
+
+#: --with-dev 가 기본으로 가리키는 자리. 팀원이 dev.csv의 answer1~5를 다수결로 모은 파일이다.
+DEFAULT_DEV_AUX = "fold_csv_files/dev_aux.csv"
+
+#: --with-dev 로 만든 분할을 쓸 때 필요한 학습 CSV. scripts/make_dev_train_csv.py 가 만든다.
+DEV_TRAIN_CSV_NAME = "train_plus_dev.csv"
+
+#: dev_aux.csv에서 다수결 정답이 적힌 열 이름.
+DEV_ANSWER_COLUMN = "answer_majority"
+
+#: 이미지가 test와 완전히 같아서 학습에서 빼야 하는 dev id 목록. --fold-dir 아래에서 찾는다.
+#: MD5로 대조한 결과 dev_aux.csv의 2,024문항 가운데 4문항이 test 이미지와 같았다.
+DEFAULT_DEV_EXCLUDE_CSV = "exclude_dev_overlap_test.csv"
 
 
 def read_ids(path: Path, *, column: str = "id") -> list[str]:
@@ -163,7 +192,132 @@ def parse_args() -> argparse.Namespace:
             f"--fold-dir 아래의 {DEFAULT_FOLDS_CSV} 를 차례로 찾는다."
         ),
     )
+    parser.add_argument(
+        "--with-dev",
+        default=None,
+        metavar="DEV_AUX_CSV",
+        help=(
+            "대회 배포 dev 세트를 학습에 더한 판을 하나 더 만든다. 'id' 열이 있는 CSV를 받으며 "
+            f"보통은 {DEFAULT_DEV_AUX} 다. 원래 파일은 그대로 두고 이름 뒤에 '_dev' 를 붙인 "
+            "파일을 따로 쓴다. 검증 목록은 바꾸지 않는다."
+        ),
+    )
+    parser.add_argument(
+        "--dev-exclude-csv",
+        default=DEFAULT_DEV_EXCLUDE_CSV,
+        help=(
+            "이미지가 test와 완전히 같아서 학습에서 빼야 하는 dev id 목록. --fold-dir 아래에서 "
+            "찾는다. --with-dev 에서만 쓰며, 파일이 없으면 경고만 남기고 넘어간다."
+        ),
+    )
     return parser.parse_args()
+
+
+def read_dev_ids(path: Path) -> list[str]:
+    """--with-dev 가 가리키는 CSV에서 dev id를 읽는다. 순서는 파일에 적힌 그대로 둔다."""
+    return read_ids(path)
+
+
+def dev_answer_counts(path: Path) -> dict[str, int]:
+    """dev_aux.csv에 answer_majority 열이 있으면 선지별 개수를 센다. 없으면 빈 dict."""
+    frame = pd.read_csv(path, encoding="utf-8-sig", dtype="string")
+    frame.columns = [str(col).strip() for col in frame.columns]
+    if DEV_ANSWER_COLUMN not in frame.columns:
+        return {}
+    values = [str(value).strip().lower() for value in frame[DEV_ANSWER_COLUMN].dropna().tolist()]
+    counts = Counter(values)
+    return {letter: int(counts[letter]) for letter in ("a", "b", "c", "d")}
+
+
+def write_dev_variant(
+    out_dir: Path,
+    name: str,
+    payload: dict[str, object],
+    dev_path: Path,
+    dev_exclude_path: Path | None = None,
+) -> None:
+    """payload의 학습 목록 뒤에 dev id를 붙인 판을 '<name>_dev.json' 으로 쓴다.
+
+    검증 목록은 건드리지 않는다. dev 문항을 학습에 더하더라도 fold 검증 점수는 dev를 넣기
+    전과 같은 문항으로 재야 두 run을 비교할 수 있기 때문이다.
+
+    train에 쓰던 test 중복 제외 정책을 dev에도 그대로 적용한다. dev 이미지 가운데 test와
+    완전히 같은 것이 있으면 그 문항을 학습하는 순간 test 정답을 외운 셈이 되기 때문이다.
+    뺀 id는 `dev_excluded_overlap_test_ids` 에 적는다.
+
+    이미 같은 id 목록을 담은 파일이 있으면 다시 쓰지 않는다. 내용이 같아도 created 줄 때문에
+    저장소에 diff가 남기 때문이다.
+    """
+    dev_ids = read_dev_ids(dev_path)
+    dev_exclude_ids = (
+        set(read_exclude_ids(dev_exclude_path)) if dev_exclude_path is not None else set()
+    )
+    dev_removed_ids = sorted(set(dev_ids) & dev_exclude_ids)
+    dev_ids = [row_id for row_id in dev_ids if row_id not in dev_exclude_ids]
+    base_train_ids = [str(i) for i in payload["train_ids"]]
+    overlap = sorted(set(base_train_ids) & set(dev_ids))
+    if overlap:
+        raise SystemExit(
+            f"[오류] {dev_path} 의 id {len(overlap)}개가 이미 학습 목록에 있습니다: {overlap[:5]}"
+        )
+    val_ids = [str(i) for i in payload["val_ids"]]
+    val_overlap = sorted(set(val_ids) & set(dev_ids))
+    if val_overlap:
+        raise SystemExit(
+            f"[오류] {dev_path} 의 id {len(val_overlap)}개가 검증 목록에 있습니다: {val_overlap[:5]}"
+        )
+
+    dev_payload = dict(payload)
+    dev_payload["version"] = str(payload["version"]) + "_dev"
+    dev_payload["source"] = str(payload["source"]) + " + 대회 배포 dev 세트"
+    dev_source_files = {
+        **dict(payload["source_files"]),  # type: ignore[arg-type]
+        dev_path.name: file_sha256(dev_path),
+    }
+    if dev_exclude_path is not None and dev_exclude_path.exists():
+        dev_source_files[dev_exclude_path.name] = file_sha256(dev_exclude_path)
+    dev_payload["source_files"] = dev_source_files
+    # 학습 목록 뒤에 붙인다. dev id는 'dev_' 로 시작해서 정렬하면 train id 앞으로 가지만,
+    # 어느 문항이 나중에 더해진 것인지 파일만 보고 알 수 있도록 순서를 지킨다.
+    dev_payload["train_ids"] = base_train_ids + dev_ids
+    dev_payload["n_train"] = len(base_train_ids) + len(dev_ids)
+    dev_payload["dev_added"] = len(dev_ids)
+    dev_payload["dev_aux_file"] = dev_path.name
+    dev_payload["dev_answer_counts"] = dev_answer_counts(dev_path)
+    dev_payload["dev_excluded_overlap_test"] = len(dev_removed_ids)
+    dev_payload["dev_excluded_overlap_test_ids"] = dev_removed_ids
+    # 학습 CSV가 train.csv 하나가 아님을 분할 파일에도 남긴다. dev 행은 train.csv에 없다.
+    dev_payload["train_csv_required"] = DEV_TRAIN_CSV_NAME
+
+    dev_name = name[: -len(".json")] + "_dev.json" if name.endswith(".json") else name + "_dev"
+    existing_path = out_dir / dev_name
+    if existing_path.exists():
+        existing = json.loads(existing_path.read_text(encoding="utf-8"))
+        same = (
+            [str(i) for i in existing.get("train_ids", [])] == dev_payload["train_ids"]
+            and [str(i) for i in existing.get("val_ids", [])] == val_ids
+        )
+        if not same:
+            raise SystemExit(
+                f"[오류] {existing_path} 가 이미 있고 id 목록이 다릅니다.\n"
+                f"기존: 학습 {len(existing.get('train_ids', []))}문항 / 검증 "
+                f"{len(existing.get('val_ids', []))}문항\n"
+                f"지금: 학습 {dev_payload['n_train']}문항 / 검증 {len(val_ids)}문항\n"
+                "입력 파일이 예전과 달라졌습니다. 정말 덮어써야 한다면 기존 파일을 먼저 지우십시오."
+            )
+        print(f"{existing_path} 가 이미 같은 id 목록이라 다시 쓰지 않습니다.")
+        return
+
+    print(
+        f"dev 추가 학습 : {dev_payload['n_train']}문항 "
+        f"(원래 {len(base_train_ids)} + dev {len(dev_ids)}, test 중복 dev 제외 "
+        f"{len(dev_removed_ids)}), 검증 {len(val_ids)}문항 그대로"
+    )
+    print(
+        f"이 분할로 학습하려면 `python scripts/make_dev_train_csv.py` 로 만든 "
+        f"{DEV_TRAIN_CSV_NAME} 를 vqa.train --train-csv 로 넘기십시오."
+    )
+    write_split(out_dir, dev_name, dev_payload)
 
 
 def read_fold_assignment(path: Path) -> dict[str, int]:
@@ -273,6 +427,24 @@ def build_fold_split(args: argparse.Namespace, fold_dir: Path, out_dir: Path) ->
     print(f"학습 나머지 fold: {len(train_ids)}문항 (test 중복 제외 {len(removed_ids)})")
 
     name = f"split_fold{val_fold}.json"
+    payload: dict[str, object] = {
+        "version": f"fold{val_fold}",
+        "source": (
+            f"fold_csv_files (팀 공식 StratifiedGroupKFold {N_FOLDS}-fold, fold {val_fold} = 검증)"
+        ),
+        "source_files": source_files,
+        "train_csv_sha256": train_csv_sha256,
+        "val_fold": val_fold,
+        "n_train": len(train_ids),
+        "n_val": len(val_ids),
+        "train_answer_counts": answer_counts(main_train_csv, train_ids),
+        "val_answer_counts": answer_counts(main_train_csv, val_ids),
+        "train_ids": sorted(train_ids),
+        "val_ids": sorted(val_ids),
+        "excluded_overlap_test": len(removed_ids),
+        "excluded_overlap_test_ids": removed_ids,
+    }
+
     # fold 0은 팀이 이미 확정해서 저장소에 넣어 둔 분할이다. 배정 파일에서 다시 만든 목록이
     # 그 파일과 다르면 배정 파일이 팀 공식 분할과 어긋난 것이므로 멈춘다. 같으면 파일을 다시
     # 쓰지 않는다. 내용이 같아도 created 줄 때문에 저장소에 diff가 남기 때문이다.
@@ -297,31 +469,24 @@ def build_fold_split(args: argparse.Namespace, fold_dir: Path, out_dir: Path) ->
             "선지 분포나 train_csv_sha256 을 새로 채워 넣으려면 그 파일을 지우고 train.csv 가 "
             "있는 자리에서 다시 실행하십시오."
         )
-        return 0
+    else:
+        print(f"val 선지 분포 : {payload['val_answer_counts']}")
+        write_split(out_dir, name, payload)
 
-    payload: dict[str, object] = {
-        "version": f"fold{val_fold}",
-        "source": (
-            f"fold_csv_files (팀 공식 StratifiedGroupKFold {N_FOLDS}-fold, fold {val_fold} = 검증)"
-        ),
-        "source_files": source_files,
-        "train_csv_sha256": train_csv_sha256,
-        "val_fold": val_fold,
-        "n_train": len(train_ids),
-        "n_val": len(val_ids),
-        "train_answer_counts": answer_counts(main_train_csv, train_ids),
-        "val_answer_counts": answer_counts(main_train_csv, val_ids),
-        "train_ids": sorted(train_ids),
-        "val_ids": sorted(val_ids),
-        "excluded_overlap_test": len(removed_ids),
-        "excluded_overlap_test_ids": removed_ids,
-    }
-    print(f"val 선지 분포 : {payload['val_answer_counts']}")
-    write_split(out_dir, name, payload)
+        val_ids_path = out_dir / f"val_fold{val_fold}_ids.txt"
+        val_ids_path.write_text("\n".join(sorted(val_ids)) + "\n", encoding="utf-8")
+        print(f"wrote {val_ids_path}")
 
-    val_ids_path = out_dir / f"val_fold{val_fold}_ids.txt"
-    val_ids_path.write_text("\n".join(sorted(val_ids)) + "\n", encoding="utf-8")
-    print(f"wrote {val_ids_path}")
+    # dev 판은 원래 파일을 이미 만들어 둔 경우에도 따로 쓴다. 기존 파일이 있다는 이유로
+    # 건너뛰면 --with-dev 를 나중에 붙였을 때 아무 일도 일어나지 않기 때문이다.
+    if args.with_dev:
+        write_dev_variant(
+            out_dir,
+            name,
+            payload,
+            Path(args.with_dev).resolve(),
+            fold_dir / args.dev_exclude_csv,
+        )
     return 0
 
 
@@ -382,6 +547,15 @@ def main() -> int:
         val_ids_path.write_text("\n".join(sorted(val_ids)) + "\n", encoding="utf-8")
         print(f"wrote {val_ids_path}")
 
+        if args.with_dev:
+            write_dev_variant(
+                out_dir,
+                "split_fold0.json",
+                fold0_payload,
+                Path(args.with_dev).resolve(),
+                fold_dir / args.dev_exclude_csv,
+            )
+
     if args.scope in ("full", "both"):
         merged_ids = sorted(set(train_ids) | set(val_ids))
         # fold 0에서 설정을 검증한 다음에만 쓰는 분할이라, 두 목록의 관계를 여기에서 한 번 더
@@ -431,6 +605,15 @@ def main() -> int:
         )
         print("검증 목록    : 0문항. 이 분할로 학습한 모델은 fold 0 정확도로 평가할 수 없습니다.")
         write_split(out_dir, "split_full.json", full_payload)
+
+        if args.with_dev:
+            write_dev_variant(
+                out_dir,
+                "split_full.json",
+                full_payload,
+                Path(args.with_dev).resolve(),
+                fold_dir / args.dev_exclude_csv,
+            )
 
     return 0
 
