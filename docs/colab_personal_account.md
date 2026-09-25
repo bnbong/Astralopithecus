@@ -184,3 +184,84 @@ A100 80GB에서 bf16으로 돌릴 때를 기준으로 잡은 값입니다.
 좋습니다. 학습 시간은 Qwen3.5 확대본의 실측값을 그대로 옮긴 어림값이므로, preflight의
 `sec_per_optimizer_step`을 보고 다시 계산하십시오. 3.8에서 가속 커널이 붙지 않으면 이 값이 두
 배 넘게 늘어날 수 있습니다.
+
+## 9. Gemma-4-31B 비교 실험
+
+`google/gemma-4-31B-it`는 Qwen 계열과도 InternVL 계열과도 다른 세 번째 계통입니다. 계통이
+다르면 같은 문항에서 틀리는 자리도 달라지므로, 단일 모델의 정확도가 조금 낮더라도 27B 확률과
+섞었을 때에는 올라갈 여지가 있습니다. 이 설정이 검증한 것은 zero-shot 추론이며, 학습은 아래
+"학습을 막는 까닭" 항목에 적은 두 가지 제약을 먼저 풀어야 시작할 수 있습니다.
+
+### 모델과 설정 파일
+
+설정 파일은 `configs/colab_gemma4_31b_bf16.yaml`입니다. 주요 값은 다음과 같습니다.
+
+| 항목 | 값 |
+|---|---|
+| `model_id` | `google/gemma-4-31B-it` (게이트가 걸려 있지 않아서 HF 토큰 없이 받을 수 있습니다) |
+| `revision` | `842da3794eaa0b77d5f08bae87a17459d91ff475` |
+| `precision` / `attn_implementation` | `bf16` / `sdpa` |
+| `prompt_id` | `v2_read_text` |
+| `weights_gb` | 62 (bf16 safetensors 두 개로 약 62.5GB입니다) |
+| `processor_kwargs.max_soft_tokens` | 1120 |
+| `lora.targets` | `auto` (`model.language_model` 아래에서 410개를 찾고 vision 쪽은 한 개도 잡지 않습니다) |
+
+해상도를 정하는 방식이 다른 모델들과 다릅니다. Qwen 계열은 `min_pixels`와 `max_pixels`로
+픽셀 수를 직접 정하고 InternVL은 448 타일을 몇 장 자를지로 정하지만, Gemma-4의
+`Gemma4ImageProcessor`는 이미지 한 장에 쓸 시각 토큰 예산을 `max_soft_tokens`로 받습니다.
+받을 수 있는 값은 70, 140, 280, 560, 1120 다섯 개뿐이고 기본값은 280입니다. 예산은 상한이므로
+실제 토큰 수는 원본 종횡비에 따라 그보다 조금 적게 나옵니다. 640x480 이미지를 넣어 본 결과
+기본값 280에서 266개가 나왔고, 설정 파일이 쓰는 1120에서는 1,064개가 나왔습니다. 추론이 너무
+느리다면 이 값을 560이나 280으로 내리십시오. 설정 파일에 남아 있는 `min_pixels`와
+`max_pixels`는 스키마를 맞추기 위한 값이며 이 모델에서는 쓰이지 않습니다.
+
+### 1번 절에서 바꿀 값
+
+```python
+CONFIG = GEMMA4_CONFIG           # configs/colab_gemma4_31b_bf16.yaml
+PROMPT_ID = "v2_read_text"       # 설정 파일에 적힌 프롬프트와 맞춥니다
+TRAIN_SCOPE = "fold0"            # fold 0을 검증으로 남겨 두고 원본 추론만 돌립니다
+```
+
+`MODEL_ID`와 `MODEL_REVISION`은 고치지 마십시오. 5번 절이 `CONFIG`에서 직접 읽습니다.
+run-id는 `gemma4_31b_base_bf16_v2_read_text`가 되므로 27B run 폴더와 섞이지 않습니다.
+학습 절은 건너뛰고 9번 절의 원본 추론만 돌린 다음, 나온 확률을 `scripts/blend_preds.py`로
+27B 결과와 섞으십시오.
+
+### 학습을 막는 까닭
+
+가중치가 62GB이므로 5번 절이 bf16 추론 하한을 74GB로, bf16 학습 하한을 82GB로 잡습니다.
+80GB A100은 추론 하한을 넘지만 학습 하한에는 못 미치므로, 그 가상 머신에서는 노트북이 학습을
+막고 추론만 허용합니다. 학습까지 하려면 gradient checkpointing을 먼저 붙여야 합니다.
+
+한 가지가 더 있습니다. `Gemma4Processor`는 배치를 인코딩할 때 이미지 목록이 표본마다 한 겹
+중첩되어 있기를 요구합니다. `vqa/collator.py`가 평평한 목록으로 먼저 부르고 그 호출이 거부되면
+중첩해서 다시 부르도록 되어 있어서 `micro_batch`를 2 이상으로 올려도 인코딩 자체는 되지만,
+역전파까지 실제로 도는지는 preflight의 `forward_backward`로 확인해야 합니다.
+
+### preflight에서 볼 항목
+
+| 검사 이름 | 확인할 내용 |
+|---|---|
+| `chat_template_tail` | generation prompt가 `<\|turn>model\n<\|channel>thought\n<channel\|>`로 끝나는지 봅니다. Gemma-4는 `enable_thinking`의 기본값이 거짓이어서 생각 채널을 열자마자 닫아 두며, 그 덕분에 첫 응답 위치가 곧바로 답 한 글자가 됩니다. 이 꼬리가 달라졌다면 추론 결과 전체를 믿을 수 없습니다. |
+| `choice_tokens` | a, b, c, d가 각각 단일 토큰인지 봅니다. 기대하는 id는 순서대로 236746, 236763, 236755, 236753입니다. |
+| `label_mask` | 표본마다 감독하는 토큰이 정확히 한 개인지 봅니다. |
+| `train_infer_prefix_match` | 학습 텍스트의 앞부분과 추론 프롬프트가 토큰 단위로 같은지 봅니다. |
+| `lora_targets` | `language_prefix`가 `model.language_model`로 잡히고 target이 410개인지 봅니다. vision 경로에 LoRA가 붙으면 FAIL로 알려 줍니다. |
+| `pixel_limits` | 이 설정에서는 WARN으로 빠집니다. `Gemma4ImageProcessor`에 `merge_size` 속성이 없어서 기대 범위를 세울 수 없기 때문이며, WARN은 전체를 막지 않습니다. 해상도가 제대로 올라갔는지는 이 검사가 아니라 추론 로그의 sequence 길이로 확인하십시오. |
+
+### 예상 소요 시간
+
+A100 80GB에서 bf16으로 zero-shot 추론만 돌릴 때를 기준으로 잡은 값입니다.
+
+| 단계 | 예상 시간 |
+|---|---|
+| 가중치 내려받기 (62GB) | 4분에서 6분 |
+| preflight (모델 적재까지) | 10분 안팎 |
+| fold 0 추론 (1,344문항) | 40분에서 60분 |
+
+추론 시간은 시각 토큰 예산을 1120으로 두었을 때의 어림값입니다. 이미지 한 장이 1,000토큰을
+넘게 차지해서 Qwen3.5 확대본보다 sequence가 길어지므로, 일정이 빠듯하다면
+`processor_kwargs.max_soft_tokens`를 560으로 내리고 다시 재 보십시오. 내려받기 시간은 Colab
+가상 머신과 Hugging Face 사이의 회선이 빠를 때의 값이며, 익명 요청의 속도 제한에 걸리면 훨씬
+오래 걸리므로 Colab 보안 비밀에 `HF_TOKEN`을 등록해 두시는 편이 좋습니다.

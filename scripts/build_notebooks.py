@@ -2554,6 +2554,14 @@ adapter를 빌려 옵니다. epoch을 2로 올렸을 때 실제로 좋아지는�
 들어가지만, 5번 절이 학습 하한을 86GB로 잡으므로 그 가상 머신에서는 학습을 막고 추론만
 허용합니다. 이 설정은 zero-shot 추론으로 다른 계통의 확률을 얻는 데 쓰십시오.
 
+모델을 Gemma-4-31B-it로 바꾸어 비교하려면 `CONFIG = GEMMA4_CONFIG` 라고 적고 `PROMPT_ID` 를
+`"v2_read_text"` 로 두십시오. Gemma-4는 Qwen 계열과도 InternVL 계열과도 계통이 다르므로,
+틀리는 문항이 달라져서 결합에서 이득을 볼 여지가 있습니다. 해상도는 `min_pixels` 가 아니라
+설정 파일의 `processor_kwargs.max_soft_tokens` 로 정하며, 허용되는 값은 70, 140, 280, 560,
+1120 다섯 개뿐입니다. 가중치가 62GB여서 80GB A100에서 bf16 추론은 들어가지만, 5번 절이 학습
+하한을 82GB로 잡으므로 그 가상 머신에서는 학습을 막고 추론만 허용합니다. 절차와 예상 시간은
+`docs/colab_personal_account.md` 의 Gemma-4-31B 비교 실험 절에 정리해 두었습니다.
+
 `MODEL_CACHE` 는 27B 가중치를 어디에 둘지 정합니다. 기본값인 `"auto"` 는 20번 노트북이 남긴
 캐시를 먼저 찾고, 없으면 Drive 여유가 `MODEL_CACHE_NEED_GB` 이상일 때에만 Drive를 씁니다.
 개인 계정처럼 Drive 용량이 부족한 상황이라면 `"local"` 로 적어서 가상 머신의 로컬 디스크에
@@ -2646,6 +2654,11 @@ INTERNVL_CONFIG = "configs/colab_internvl35_8b_bf16.yaml"
 # "v2_read_text" 로 맞추십시오. 가중치가 66GB여서 80GB A100에서 bf16 추론은 들어가지만
 # 학습은 아래 5번 절이 막습니다(학습 하한 86GB).
 QWEN3VL_CONFIG = "configs/colab_qwen3vl_32b_bf16_upscale.yaml"
+# Gemma-4-31B-it 비교 실험용 설정입니다. Qwen 계열과도 InternVL 계열과도 다른 세 번째
+# 계통이며, 시각 토큰 예산을 max_soft_tokens 로 정하는 processor 를 씁니다. 쓰려면
+# CONFIG = GEMMA4_CONFIG 라고 적고 PROMPT_ID 를 "v2_read_text" 로 맞추십시오. 가중치가
+# 62GB여서 80GB A100에서 bf16 추론은 들어가지만 학습은 아래 5번 절이 막습니다(학습 하한 82GB).
+GEMMA4_CONFIG = "configs/colab_gemma4_31b_bf16.yaml"
 CONFIG = ""                       # 비워 두면 아래 셀이 정책과 VRAM을 보고 정합니다. 직접 적으면 그 값을 씁니다.
 PROMPT_ID = "v1_image_only"       # 학습과 추론이 모두 이 프롬프트를 씁니다.
 
@@ -2655,6 +2668,10 @@ PROMPT_ID = "v1_image_only"       # 학습과 추론이 모두 이 프롬프트�
 # 바꿉니다. 예를 들어 Qwen3.8-27B이면 "colab38_27b_base_bf16" 이 됩니다.
 BASE_RUN_ID = "colab27b_base_bf16"
 FT_RUN_ID = "colab27b_ft_bf16"
+# seed 실험 예시: 전체 데이터 모델 B와 같은 레시피를 seed만 바꿔 한 번 더 학습해서 두 모델의
+# 확률을 평균하려면 `CONFIG = "configs/colab_qwen35_27b_bf16_upscale_seed43.yaml"`,
+# `FT_RUN_ID = "colab27b_ft_bf16_s43"`, `TRAIN_SCOPE = "full"` 이라고 적으십시오. seed는
+# run-id 파생에 관여하지 않으므로 FT_RUN_ID를 손으로 바꾸지 않으면 B의 run 폴더를 덮어씁니다.
 
 # --- 데이터 분할 ---
 # TRAIN_SCOPE 가 "fold0" 이면 fold 1~4만 학습하고 fold 0으로 검증합니다. 설정을 비교하는

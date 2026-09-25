@@ -152,6 +152,22 @@ def test_notebook_offers_the_qwen3vl_config():
     assert 'QWEN3VL_CONFIG = "%s"' % QWEN3VL_CONFIG in notebook_source()
 
 
+GEMMA4_CONFIG = "configs/colab_gemma4_31b_bf16.yaml"
+
+
+def test_gemma4_31b_gets_its_own_run_id_prefix():
+    """Qwen 계열 run 폴더에 Gemma-4 예측이 섞이면 결합할 때 구분할 수 없다."""
+    base, ft = derive_run_ids(GEMMA4_CONFIG, prompt_id="v2_read_text")
+    assert base == "gemma4_31b_base_bf16_v2_read_text"
+    assert ft == "gemma4_31b_ft_bf16_v2_read_text"
+    for other in (BF16_CONFIG, UPSCALE_CONFIG, QWEN38_UPSCALE_CONFIG, QWEN3VL_CONFIG):
+        assert not set(derive_run_ids(other, prompt_id="v2_read_text")) & {base, ft}
+
+
+def test_notebook_offers_the_gemma4_config():
+    assert 'GEMMA4_CONFIG = "%s"' % GEMMA4_CONFIG in notebook_source()
+
+
 def test_notebook_splits_the_bf16_inference_and_training_thresholds():
     """가중치 66GB에서 80GB A100의 bf16 추론은 되고 학습은 막혀야 한다."""
     source = notebook_source()

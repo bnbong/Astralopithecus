@@ -1,0 +1,53 @@
+# Colab Pro+ A100 80GB / transformers 5.x / Qwen3.5-27B bf16 LoRA / 작은 이미지 확대본, seed 43.
+# colab_qwen35_27b_bf16_upscale.yaml 을 그대로 복사하고 train.seed 만 42에서 43으로 바꿨다.
+#
+# 목적: 2026-09-26 예정, 전체 데이터 모델 B(colab_qwen35_27b_bf16_upscale.yaml,
+# TRAIN_SCOPE=full, run-id colab27b_ft_bf16_full_v2_read_text_upscale, seed 42)와 완전히
+# 같은 레시피를 seed만 바꿔 한 번 더 학습해서 모델 B2를 얻는다. B와 B2의 추론 확률을
+# 평균하면 seed 하나에 의존하는 분산을 줄일 수 있다는 것이 이 실험의 가설이다. 그 외 값은
+# colab_qwen35_27b_bf16_upscale.yaml과 전부 같다.
+#
+# 주의: run_id_prefix와 res_suffix 파생 규칙은 파일 이름이 아니라 model_id와 upscale 여부만
+# 보고, train.seed 는 run-id 파생에 전혀 관여하지 않으므로, 이 설정의 run-id는 B와 똑같이
+# colab27b_ft_bf16_full_v2_read_text_upscale로 나온다. 그대로 두면 B의 run 폴더를 덮어쓰니,
+# 노트북 21번의 절 1에서 FT_RUN_ID를 반드시 "colab27b_ft_bf16_s43" 로 손으로 바꿔야 한다.
+# 다만 train.seed는 config_hash에 들어가는 키라 config_hash 자체는 B와 다르게 나오므로,
+# checkpoint 재개 검사는 서로 섞이지 않는다.
+#
+# 주의: VRAM과 속도는 이 파일을 쓰기 전에 preflight로 반드시 확인한다. 기존 bf16 학습은
+# peak 57GB, step당 13.5초였다. 40GB 가상 머신에서는 이 설정으로 학습하지 않는다.
+model_id: Qwen/Qwen3.5-27B
+revision: fc05daec18b0a78c049392ed2e771dde82bdf654   # 2026-09-21 Colab A100에서 받은 스냅샷 커밋
+model_path: null          # 오프라인이면 로컬 스냅샷 디렉터리를 여기에 적는다
+precision: bf16
+attn_implementation: sdpa
+
+min_pixels: 1048576        # 1024 * 32 * 32
+max_pixels: 2097152        # 2048 * 32 * 32
+
+prompt_id: v1_image_only
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  targets: auto
+
+train:
+  lr: 1.0e-4
+  epochs: 1
+  micro_batch: 1
+  grad_accum: 8
+  warmup_ratio: 0.03
+  scheduler: linear
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  seed: 43
+  shuffle_options: true
+  save_every_steps: 50
+  save_every_minutes: 15
+  keep_last: 2
+
+infer:
+  batch_size: 1
+  save_every_items: 50

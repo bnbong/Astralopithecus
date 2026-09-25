@@ -275,7 +275,13 @@ class Scorer:
                 )
             )
             images.append(image)
-        return self.processor(text=texts, images=images, padding=True, return_tensors="pt")
+        # processor를 곧바로 부르지 않고 collator의 도우미를 거친다. 이미지 목록이
+        # 표본마다 중첩되어 있어야 하는 processor(Gemma4)가 있어서, 평평한 목록이
+        # 거부되었을 때 중첩해서 다시 부르는 경로가 여기에도 필요하기 때문이다.
+        return collator_mod.call_processor(
+            self.processor,
+            dict(text=texts, images=images, padding=True, return_tensors="pt"),
+        )
 
     def score(self, enc, *, also_base: bool = False):
         """(shown 순서 확률, base 확률 또는 None)."""

@@ -277,6 +277,10 @@ RUN_ID_PREFIX_BY_MODEL: dict[str, str] = {
     "internvl3_5-8b-hf": "internvl35_8b",
     # Qwen3-VL-32B-Instruct는 3.5/3.8 계열과 구조도 크기도 달라서 앞머리를 따로 둔다.
     "qwen3-vl-32b-instruct": "qwen3vl_32b",
+    # Gemma-4-31B-it는 Qwen 계열과도 InternVL 계열과도 다른 세 번째 계통이다. base 판과
+    # instruct 판을 모두 적어 두어, 어느 쪽을 지정하더라도 같은 앞머리로 내려가게 한다.
+    "gemma-4-31b-it": "gemma4_31b",
+    "gemma-4-31b": "gemma4_31b",
 }
 
 #: model_id 가 위 표에 없을 때 쓰는 접두사.

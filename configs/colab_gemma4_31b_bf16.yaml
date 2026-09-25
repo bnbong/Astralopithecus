@@ -1,0 +1,106 @@
+# Colab Pro+ A100 80GB / transformers 5.x / Gemma-4-31B-it bf16 / 계통이 다른 비교 실험.
+#
+# 목적: Qwen 계열과 InternVL 계열에 이어 세 번째 계통의 확률을 얻어
+# scripts/blend_preds.py 로 섞는 것이다. 계통이 다르면 틀리는 문항도 달라지므로, 단일
+# 모델 정확도가 조금 낮아도 결합에서는 올라갈 여지가 있다. 그래서 이 설정이 검증한 것은
+# zero-shot 추론이다. LoRA 학습은 아래 "학습" 항목의 제약을 먼저 읽으십시오.
+#
+# 모델 판: instruct 판인 google/gemma-4-31B-it 를 쓴다. 같은 이름의 base 판
+# google/gemma-4-31B 도 공개되어 있지만, chat template 으로 a/b/c/d 를 한 글자만 받아야
+# 하는 이 파이프라인에서는 instruct 판이 맞다.
+#
+# 구조: HF API 로 받은 config.json 의 architectures 는 Gemma4ForConditionalGeneration 이고
+# model_type 은 gemma4 다. 언어 쪽은 60층에 hidden 5,376 이며, sliding_attention 다섯 층마다
+# full_attention 한 층이 들어가는 하이브리드 어텐션이다(sliding_window 1024). 시각 쪽은
+# 27층짜리 자체 encoder 로 파라미터가 약 550M 이다. meta device 에 올려 전체 모듈 이름을
+# 확인한 결과 최상위가 model.vision_tower / model.embed_vision / model.language_model 이어서,
+# vqa/modeling.py 의 language_model 루트 탐색과 vision 경로 제외가 고치지 않아도 그대로
+# 맞는다. 실제로 model.language_model 아래에서 LoRA target 410개를 찾고 vision 쪽은 한 개도
+# 잡지 않는다. k/v 를 공유하는 층이 있어서 v_proj 는 50개이고 나머지 leaf 는 60개씩이다.
+# Auto 클래스는 transformers 버전에 따라 갈린다. 로컬 5.17.0 에서는 첫 후보인
+# AutoModelForMultimodalLM 에서 바로 걸리지만, Colab 이 고정해 둔 5.16.1 의
+# MODEL_FOR_MULTIMODAL_LM_MAPPING_NAMES 에는 gemma4 가 없어서 첫 후보가 실패하고
+# 두 번째 후보인 AutoModelForImageTextToText 가 받는다. vqa/modeling.py 가 세 후보를
+# 차례로 시도하므로 두 버전 모두 로드되며, 어느 쪽이 걸렸는지는 run_manifest 에 남는다.
+#
+# 이미지 처리: Qwen 계열의 min_pixels / max_pixels 방식도 아니고 InternVL 의 타일 개수
+# 방식도 아니다. Gemma4ImageProcessor 는 이미지 한 장에 쓸 시각 토큰 예산을
+# max_soft_tokens 로 받으며, 받을 수 있는 값은 70, 140, 280, 560, 1120 다섯 개뿐이다.
+# 기본값은 280 이다. 예산은 상한이어서 실제 토큰 수는 원본 종횡비에 따라 그보다 조금
+# 적게 나온다. 로컬에서 processor 만 받아 640x480 이미지를 넣어 본 결과, 기본값 280 에서
+# 시각 토큰이 266개, 아래처럼 1120 으로 올리면 1,064개가 되었다. 해상도를 낮춰 속도를
+# 얻으려면 이 값을 560 이나 280 으로 내리십시오.
+#
+# min_pixels / max_pixels: Gemma4ImageProcessor 는 두 인자를 받아도 무시한다. 로컬
+# transformers 5.17.0 에서 두 값을 넣어 processor 를 만들어 본 결과 image_processor 에
+# 속성으로 남지도 않았고 토큰 수도 달라지지 않았다. 설정 스키마가 두 키를 요구하므로
+# 남겨 두되, 이 모델에서 해상도를 실제로 바꾸는 것은 processor_kwargs.max_soft_tokens
+# 하나뿐이다. 그래서 preflight 의 pixel_limits 검사는 이 설정에서 WARN 으로 빠진다
+# (image_processor 에 merge_size 속성이 없다). WARN 은 전체를 막지 않는다.
+#
+# thinking: chat_template.jinja 를 받아 확인한 결과 enable_thinking 인자가 있고 기본값이
+# false 다. 끈 상태에서 generation prompt 는 "<|turn>model\n<|channel>thought\n<channel|>"
+# 로 끝난다. 생각 채널을 열자마자 닫아 두는 형태여서 첫 응답 위치가 곧바로 답 한 글자가
+# 된다. assistant turn 의 꼬리는 "<turn|>\n" 이고 종료 토큰은 <end_of_turn>(id 106)과
+# <eos>(id 1)다. vqa/prompt.py 가 넘기는 enable_thinking=False 는 이 템플릿이 실제로 읽는
+# 인자이므로 그대로 동작한다. 이미지 자리 표시는 <|image|> 이고 system turn 도 지원한다.
+# a/b/c/d 는 각각 단일 토큰(236746 / 236763 / 236755 / 236753)이며 generation prompt 꼬리
+# 뒤에 붙여도 병합되지 않는다. 로컬에서 processor 만 받아 직접 확인한 값이다.
+#
+# 가중치: bf16 safetensors 2개로 약 62GB(62.5 GB)다. 아래 weights_gb 가 21번 노트북 5번
+# 절의 VRAM 하한과 캐시 여유 판단에 쓰인다. 5번 절은 bf16 추론 하한을 weights_gb + 12 =
+# 74GB 로 잡으므로 80GB A100 에서 추론이 통과한다. 학습 하한은 weights_gb + 20 = 82GB 라
+# 같은 가상 머신에서 학습은 막힌다.
+#
+# 게이트: gated 가 아니어서 HF 토큰 없이 내려받을 수 있다. 라이선스는 apache-2.0 이다.
+#
+# 학습: 이 설정으로 검증한 것은 zero-shot 추론뿐이다. 학습을 하려면 두 가지를 먼저
+# 해결해야 한다. 첫째, 위에서 적은 대로 80GB A100 에서는 5번 절이 학습을 막으므로
+# gradient checkpointing 을 붙여야 한다. 둘째, Gemma4Processor 는 배치를 인코딩할 때
+# 이미지 목록이 표본마다 중첩된 형태이기를 요구한다. vqa/collator.py 가 평평한 목록으로
+# 먼저 부르고 실패하면 중첩해서 다시 부르도록 되어 있으므로 micro_batch 를 2 이상으로
+# 올려도 동작하지만, 실제 역전파까지는 preflight 의 forward_backward 로 확인해야 한다.
+model_id: google/gemma-4-31B-it
+revision: 842da3794eaa0b77d5f08bae87a17459d91ff475   # 2026-09-25 HF API로 조회한 main 브랜치 커밋
+model_path: null          # 오프라인이면 로컬 스냅샷 디렉터리를 여기에 적는다
+precision: bf16
+attn_implementation: sdpa
+
+# bf16 가중치 크기(GB). 21번 노트북이 VRAM 하한과 캐시 여유를 판단할 때 읽는다.
+weights_gb: 62
+
+# Gemma4 의 시각 토큰 예산. 70 / 140 / 280 / 560 / 1120 중 하나여야 한다. 비교 실험은 가장
+# 큰 값으로 두어 작은 글자를 최대한 살린다. AutoProcessor.from_pretrained 에 그대로 넘어간다.
+processor_kwargs:
+  max_soft_tokens: 1120
+
+# 이 모델에서는 쓰이지 않는다. 위 주석을 보라. 스키마를 맞추기 위한 값이다.
+min_pixels: 179200         # 시각 토큰 70개에 대응하는 대략적인 픽셀 수
+max_pixels: 2867200        # 시각 토큰 1120개에 대응하는 대략적인 픽셀 수
+
+prompt_id: v2_read_text
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  targets: auto
+
+train:
+  lr: 1.0e-4
+  epochs: 1
+  micro_batch: 1
+  grad_accum: 8
+  warmup_ratio: 0.03
+  scheduler: linear
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  seed: 42
+  shuffle_options: true
+  save_every_steps: 50
+  save_every_minutes: 15
+  keep_last: 2
+
+infer:
+  batch_size: 1
+  save_every_items: 50

@@ -338,9 +338,30 @@ def encode_batch_right_padded(processor: Any, texts: Sequence[str], images: Sequ
     """
     kwargs = dict(text=list(texts), images=list(images), padding=True, return_tensors="pt")
     try:
-        return processor(**kwargs, padding_side="right")
+        return call_processor(processor, kwargs, padding_side="right")
     except TypeError:
-        return processor(**kwargs)
+        return call_processor(processor, kwargs)
+
+
+def call_processor(processor: Any, kwargs: dict[str, Any], **extra: Any):
+    """processor를 부르되 이미지 목록의 중첩 형식만 한 번 더 시도한다.
+
+    대부분의 processor는 표본 하나에 이미지 하나를 평평한 목록으로 받는다. 그런데
+    Gemma4Processor는 표본마다 이미지 목록이 한 겹 더 중첩되어 있기를 요구해서, 평평한
+    목록을 넘기면 배치 크기가 어긋났다는 ValueError를 올린다. 모델 이름으로 갈라 놓으면
+    새 모델이 들어올 때마다 이 함수를 고쳐야 하므로, 평평한 형태로 먼저 부르고 그 호출이
+    실패했을 때에만 중첩해서 다시 부른다. 평평한 호출이 성공하는 processor에서는 두 번째
+    경로에 들어가지 않으므로 기존 동작이 달라지지 않는다.
+    """
+    try:
+        return processor(**kwargs, **extra)
+    except ValueError:
+        images = kwargs.get("images")
+        if not images or any(isinstance(item, (list, tuple)) for item in images):
+            raise
+        nested = dict(kwargs)
+        nested["images"] = [[item] for item in images]
+        return processor(**nested, **extra)
 
 
 def strip_pad_positions(input_ids, attention_mask=None) -> list[int]:

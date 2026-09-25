@@ -23,6 +23,7 @@ EXPECTED_CONFIGS = [
     "colab_qwen35_27b_nf4.yaml",
     "colab_qwen35_27b_bf16_upscale.yaml",
     "colab_qwen35_27b_bf16_upscale_3ep.yaml",
+    "colab_qwen35_27b_bf16_upscale_seed43.yaml",
     "colab_qwen38_27b_bf16_upscale.yaml",
 ]
 
