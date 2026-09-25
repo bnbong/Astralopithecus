@@ -2562,6 +2562,15 @@ adapter를 빌려 옵니다. epoch을 2로 올렸을 때 실제로 좋아지는�
 하한을 82GB로 잡으므로 그 가상 머신에서는 학습을 막고 추론만 허용합니다. 절차와 예상 시간은
 `docs/colab_personal_account.md` 의 Gemma-4-31B 비교 실험 절에 정리해 두었습니다.
 
+같은 Gemma-4를 학습까지 하려면 `CONFIG = GEMMA4_QLORA_CONFIG` 라고 적으십시오. 가중치를 nf4로
+양자화해서 올리고 LoRA adapter만 bf16으로 학습하는 설정이며, 5번 절이 읽는 `weights_gb` 가
+17이라서 학습 하한이 37.0GB로 내려가고 80GB A100에서 학습이 허용됩니다. 양자화에서
+`model.vision_tower` 와 `model.embed_vision` 과 `lm_head` 를 제외하므로 이미지 특징과 출력
+계층은 bf16 그대로입니다. 학습 결과는 nf4 zero-shot이 아니라 bf16 zero-shot의 fold 0 정확도
+0.9695와 견주셔야 합니다. nf4는 가중치를 4bit로 뭉개므로 같은 모델이라도 zero-shot 정확도가
+bf16보다 낮게 나올 수 있고, 그 낮아진 값을 기준으로 삼으면 학습이 실제로 도움이 되었는지
+판단할 수 없기 때문입니다.
+
 `MODEL_CACHE` 는 27B 가중치를 어디에 둘지 정합니다. 기본값인 `"auto"` 는 20번 노트북이 남긴
 캐시를 먼저 찾고, 없으면 Drive 여유가 `MODEL_CACHE_NEED_GB` 이상일 때에만 Drive를 씁니다.
 개인 계정처럼 Drive 용량이 부족한 상황이라면 `"local"` 로 적어서 가상 머신의 로컬 디스크에
@@ -2659,6 +2668,14 @@ QWEN3VL_CONFIG = "configs/colab_qwen3vl_32b_bf16_upscale.yaml"
 # CONFIG = GEMMA4_CONFIG 라고 적고 PROMPT_ID 를 "v2_read_text" 로 맞추십시오. 가중치가
 # 62GB여서 80GB A100에서 bf16 추론은 들어가지만 학습은 아래 5번 절이 막습니다(학습 하한 82GB).
 GEMMA4_CONFIG = "configs/colab_gemma4_31b_bf16.yaml"
+# 같은 Gemma-4-31B-it 를 nf4 로 양자화해서 올리고 LoRA adapter 만 학습하는 설정입니다.
+# bf16 가중치 62GB 는 80GB A100 에서 학습 활성값이 들어가지 않지만, nf4 로 내리면 5번 절이
+# 학습 하한을 37.0GB 로 잡으므로 같은 가상 머신에서 학습이 허용됩니다. 쓰려면
+# CONFIG = GEMMA4_QLORA_CONFIG 라고 적고 PROMPT_ID 를 "v2_read_text" 로 맞추십시오.
+# 설정 파일이 nf4 이므로 run-id 의 "_bf16" 이 "_nf4" 로 바뀌어
+# gemma4_31b_ft_nf4_v2_read_text 가 되며, bf16 zero-shot 결과와 섞이지 않습니다.
+# 학습 결과는 nf4 zero-shot 이 아니라 bf16 zero-shot 의 fold 0 정확도 0.9695 와 견주십시오.
+GEMMA4_QLORA_CONFIG = "configs/colab_gemma4_31b_nf4_lora.yaml"
 CONFIG = ""                       # 비워 두면 아래 셀이 정책과 VRAM을 보고 정합니다. 직접 적으면 그 값을 씁니다.
 PROMPT_ID = "v1_image_only"       # 학습과 추론이 모두 이 프롬프트를 씁니다.
 
@@ -2853,6 +2870,12 @@ run-id는 모델과 프롬프트와 해상도와 정밀도가 다른 결과가 �
   `configs/colab_qwen38_27b_bf16_upscale.yaml`)을 적었으면 `_upscale` 을 덧붙입니다. 해상도가
   다른 예측이 같은 run 폴더에 섞이지 않게 하려는 것입니다.
 - 정책이 bf16인데 VRAM이 모자라서 nf4로 내려가면 맨 뒤에 `_nf4` 를 덧붙이고 학습을 막습니다.
+- `CONFIG` 로 적은 설정 파일 자체가 `precision: nf4` 이면 맨 뒤에 덧붙이는 대신 기본 이름의
+  `_bf16` 을 `_nf4` 로 바꿉니다. 같은 모델을 bf16으로 한 번, nf4로 한 번 돌리면 나머지
+  접미사가 모두 같아져서 두 정밀도의 예측과 checkpoint가 한 폴더에 섞이기 때문입니다.
+  `CONFIG = GEMMA4_QLORA_CONFIG` 에 프롬프트를 `v2_read_text` 로 두면 학습 run-id는
+  `gemma4_31b_ft_nf4_v2_read_text` 가 되고, bf16 zero-shot의
+  `gemma4_31b_base_bf16_v2_read_text` 와 겹치지 않습니다.
 
 예를 들어 `TRAIN_SCOPE` 가 `full` 이고 프롬프트가 기본값이며 bf16으로 돌아가면 학습 run-id는
 `colab27b_ft_bf16_full` 이 됩니다. 같은 조건에서 확대본을 쓰고 프롬프트를 `v2_read_text`
@@ -3168,6 +3191,19 @@ if MODEL_RUN_PREFIX != _config_mod.DEFAULT_RUN_ID_PREFIX:
         else:
             print("%s 가 %r 로 시작하지 않아 이름을 그대로 둡니다: %s"
                   % (_name, _config_mod.DEFAULT_RUN_ID_PREFIX, _stem))
+
+# 설정 파일 자체가 nf4 이면 기본 이름의 "_bf16" 을 "_nf4" 로 바꿉니다. 같은 모델을 bf16 으로
+# 한 번, nf4 로 한 번 돌리면 접미사가 모두 같아져서 두 정밀도의 예측과 checkpoint 가 한 run
+# 폴더에 섞이기 때문입니다. VRAM 이 모자라서 정밀도만 내려간 경우(PRECISION_SUFFIX 가
+# "_nf4" 인 경우)는 여기에 들어오지 않습니다. 그 경로는 지금까지처럼 이름 맨 뒤에 "_nf4" 를
+# 덧붙여서 기존 run 폴더 이름을 그대로 지킵니다.
+if PRECISION == "nf4" and not PRECISION_SUFFIX:
+    for _name in ("BASE_RUN_ID", "FT_RUN_ID"):
+        _stem = globals()[_name]
+        if _stem.endswith("_bf16"):
+            _new = _stem[: -len("_bf16")] + "_nf4"
+            globals()[_name] = _new
+            print("%s 를 설정 파일의 정밀도에 맞게 바꿉니다: %s -> %s" % (_name, _stem, _new))
 
 PROMPT_SUFFIX = "" if PROMPT_ID == "v1_image_only" else "_" + PROMPT_ID
 

@@ -282,3 +282,94 @@ def test_validation_inference_still_reads_train_csv():
     assert '"--csv", "train.csv", "--ids-file", VAL_IDS_FILE,' in source
     # 검증 id는 _dev 판이 아니라 원래 분할 파일에서 읽는다.
     assert '_split_payload = json.loads(Path(BASE_SPLIT_FILE).read_text(encoding="utf-8"))' in source
+
+
+# --------------------------------------------------------------------------
+# 설정 파일 자체가 nf4 인 경우 (Gemma-4 QLoRA)
+# --------------------------------------------------------------------------
+
+GEMMA4_QLORA_CONFIG = "configs/colab_gemma4_31b_nf4_lora.yaml"
+
+
+def derive_run_ids_by_precision(config_path, prompt_id="v1_image_only", train_scope="fold0",
+                                precision_suffix="", base_stem="colab27b_base_bf16",
+                                ft_stem="colab27b_ft_bf16"):
+    """21번 노트북 5번 절의 run-id 파생 규칙에 정밀도 이름 교체까지 옮겨 적은 것이다.
+
+    `precision_suffix` 는 VRAM 이 모자라서 정밀도만 내려간 경우에 들어오는 값이다. 그 경우는
+    기존 run 폴더 이름을 지키려고 맨 뒤에 덧붙이기만 하고 기본 이름을 건드리지 않는다.
+    """
+    cfg = config_mod.load_config(ROOT / config_path)
+    precision = str(config_mod.get_path(cfg, "precision"))
+    prefix = config_mod.run_id_prefix(config_mod.get_path(cfg, "model_id"))
+    default = config_mod.DEFAULT_RUN_ID_PREFIX
+    if prefix != default:
+        if base_stem.startswith(default):
+            base_stem = prefix + base_stem[len(default):]
+        if ft_stem.startswith(default):
+            ft_stem = prefix + ft_stem[len(default):]
+
+    if precision == "nf4" and not precision_suffix:
+        base_stem = base_stem[: -len("_bf16")] + "_nf4" if base_stem.endswith("_bf16") else base_stem
+        ft_stem = ft_stem[: -len("_bf16")] + "_nf4" if ft_stem.endswith("_bf16") else ft_stem
+
+    prompt_suffix = "" if prompt_id == "v1_image_only" else "_" + prompt_id
+    res_suffix = "_upscale" if "upscale" in Path(config_path).stem else ""
+    scope_suffix = "_full" if train_scope == "full" else ""
+
+    def resolve(stem, scope=""):
+        return stem + scope + prompt_suffix + res_suffix + precision_suffix
+
+    return resolve(base_stem), resolve(ft_stem, scope_suffix)
+
+
+def test_gemma4_qlora_run_ids_say_nf4():
+    base, ft = derive_run_ids_by_precision(GEMMA4_QLORA_CONFIG, prompt_id="v2_read_text")
+    assert base == "gemma4_31b_base_nf4_v2_read_text"
+    assert ft == "gemma4_31b_ft_nf4_v2_read_text"
+    assert derive_run_ids_by_precision(
+        GEMMA4_QLORA_CONFIG, prompt_id="v2_read_text", train_scope="full"
+    )[1] == "gemma4_31b_ft_nf4_full_v2_read_text"
+
+
+def test_gemma4_qlora_never_shares_a_run_folder_with_the_bf16_zero_shot():
+    """bf16 zero-shot 확률은 이미 결합에 쓰고 있으므로 덮어쓰이면 안 된다."""
+    nf4 = set(derive_run_ids_by_precision(GEMMA4_QLORA_CONFIG, prompt_id="v2_read_text"))
+    bf16 = set(derive_run_ids_by_precision(GEMMA4_CONFIG, prompt_id="v2_read_text"))
+    assert not nf4 & bf16
+    assert "gemma4_31b_base_bf16_v2_read_text" in bf16
+
+
+def test_bf16_configs_keep_their_existing_run_ids():
+    """정밀도 이름 교체가 기존 bf16 run 폴더 이름을 건드리면 안 된다."""
+    for path in (BF16_CONFIG, UPSCALE_CONFIG, QWEN38_UPSCALE_CONFIG, QWEN3VL_CONFIG, GEMMA4_CONFIG):
+        assert derive_run_ids_by_precision(path) == derive_run_ids(path), path
+
+
+def test_downgraded_precision_still_appends_the_suffix():
+    """VRAM 부족으로 내려간 경로는 지금까지처럼 맨 뒤에 _nf4 만 붙는다."""
+    base, ft = derive_run_ids_by_precision(BF16_CONFIG, precision_suffix="_nf4")
+    assert (base, ft) == ("colab27b_base_bf16_nf4", "colab27b_ft_bf16_nf4")
+
+
+def test_notebook_offers_the_gemma4_qlora_config():
+    assert 'GEMMA4_QLORA_CONFIG = "%s"' % GEMMA4_QLORA_CONFIG in notebook_source()
+
+
+def test_notebook_renames_the_stem_when_the_config_itself_is_nf4():
+    source = notebook_source()
+    assert 'if PRECISION == "nf4" and not PRECISION_SUFFIX:' in source
+    assert '_new = _stem[: -len("_bf16")] + "_nf4"' in source
+
+
+def test_notebook_training_allows_the_nf4_gemma_config():
+    """weights_gb 17 이면 학습 하한이 37.0GB 라서 80GB A100 에서 학습이 허용되어야 한다."""
+    source = notebook_source()
+    assert "VRAM_BF16_GB = round(max(70.0 * _weights_scale, WEIGHTS_GB + 20.0), 1)" in source
+    # 학습을 막는 조건은 bf16 설정이거나 확대본일 때뿐이다. nf4 설정이고 확대본이 아니면 통과한다.
+    assert 'if VRAM_GB < VRAM_BF16_GB and (UPSCALE or PRECISION == "bf16"):' in source
+    cfg = config_mod.load_config(ROOT / GEMMA4_QLORA_CONFIG)
+    weights_gb = float(config_mod.get_path(cfg, "weights_gb"))
+    assert round(max(70.0 * (weights_gb / 54.0), weights_gb + 20.0), 1) == 37.0
+    assert round(35.0 * (weights_gb / 54.0), 1) <= 80.0
+    assert "upscale" not in Path(GEMMA4_QLORA_CONFIG).stem

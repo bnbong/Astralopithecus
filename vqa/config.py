@@ -242,6 +242,16 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if weights_gb is not None:
         if isinstance(weights_gb, bool) or not isinstance(weights_gb, (int, float)) or weights_gb <= 0:
             raise ConfigError(f"weights_gb는 양수여야 합니다: {weights_gb!r}")
+    # quant_skip_modules 도 선택 키다. 양자화에서 제외할 모듈 이름 목록이며, precision 이
+    # bf16 이면 아무 일도 하지 않는다. DEFAULTS 에 넣지 않는 까닭은 위와 같다.
+    quant_skip_modules = get_path(config, "quant_skip_modules")
+    if quant_skip_modules is not None:
+        if not isinstance(quant_skip_modules, list) or not all(
+            isinstance(name, str) and name.strip() for name in quant_skip_modules
+        ):
+            raise ConfigError(
+                f"quant_skip_modules는 비어 있지 않은 문자열의 리스트여야 합니다: {quant_skip_modules!r}"
+            )
     # train.loss 와 train.keep_epoch_adapters 도 같은 까닭으로 선택 키다. DEFAULTS 에 넣으면
     # 이미 돌고 있는 27B run 들의 config_hash 가 바뀌어 checkpoint 재개가 거부된다. 설정 파일에
     # 적혀 있을 때에만 형식을 보고, 적혀 있지 않으면 train.py 가 기본값으로 동작한다.

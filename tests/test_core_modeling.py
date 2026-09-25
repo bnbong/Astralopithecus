@@ -350,3 +350,66 @@ def test_processor_kwargs_survive_the_typeerror_fallback(monkeypatch):
     assert len(calls) == 2
     assert "min_pixels" not in calls[-1]
     assert calls[-1]["max_patches"] == 6
+
+
+# --------------------------------------------------------------------------
+# 양자화에서 제외할 모듈 (quant_skip_modules)
+# --------------------------------------------------------------------------
+
+
+def test_quantization_config_is_none_for_bf16():
+    assert modeling.quantization_config("bf16") is None
+
+
+def test_nf4_without_skip_modules_leaves_the_default_behaviour():
+    """제외 목록을 적지 않으면 transformers 의 기본 제외 목록을 그대로 쓰게 둔다."""
+    pytest.importorskip("transformers")
+    quant = modeling.quantization_config("nf4")
+    assert quant.load_in_4bit is True
+    assert quant.bnb_4bit_quant_type == "nf4"
+    assert quant.bnb_4bit_use_double_quant is True
+    assert quant.llm_int8_skip_modules is None
+
+
+def test_nf4_skip_modules_always_carry_lm_head():
+    """제외 목록을 한 개라도 적으면 transformers 가 기본 목록을 버리므로 lm_head 를 덧붙인다."""
+    pytest.importorskip("transformers")
+    quant = modeling.quantization_config("nf4", ["model.vision_tower", "model.embed_vision"])
+    assert quant.llm_int8_skip_modules == [
+        "model.vision_tower",
+        "model.embed_vision",
+        "lm_head",
+    ]
+
+
+def test_resolve_quant_skip_modules_does_not_duplicate_lm_head():
+    assert modeling.resolve_quant_skip_modules(["lm_head"]) == ["lm_head"]
+    assert modeling.resolve_quant_skip_modules([]) is None
+    assert modeling.resolve_quant_skip_modules(None) is None
+
+
+def test_load_base_model_passes_quant_skip_modules_from_the_config(monkeypatch):
+    """설정 파일의 quant_skip_modules 가 BitsAndBytesConfig 까지 내려가야 한다."""
+    captured: dict = {}
+
+    class Works:
+        @staticmethod
+        def from_pretrained(_src, **kwargs):
+            captured.update(kwargs)
+            return FakeQwen35(n_language=1, n_vision=1)
+
+    monkeypatch.setattr(modeling, "_auto_classes", lambda: [("AutoModelForMultimodalLM", Works)])
+    monkeypatch.setattr(
+        modeling,
+        "quantization_config",
+        lambda precision, skip_modules=None: {"precision": precision, "skip": skip_modules},
+    )
+    modeling.load_base_model(
+        {"precision": "nf4", "quant_skip_modules": ["model.vision_tower"]},
+        source="dummy",
+        for_training=False,
+    )
+    assert captured["quantization_config"] == {
+        "precision": "nf4",
+        "skip": ["model.vision_tower"],
+    }

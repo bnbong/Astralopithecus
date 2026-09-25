@@ -265,3 +265,106 @@ A100 80GB에서 bf16으로 zero-shot 추론만 돌릴 때를 기준으로 잡은
 `processor_kwargs.max_soft_tokens`를 560으로 내리고 다시 재 보십시오. 내려받기 시간은 Colab
 가상 머신과 Hugging Face 사이의 회선이 빠를 때의 값이며, 익명 요청의 속도 제한에 걸리면 훨씬
 오래 걸리므로 Colab 보안 비밀에 `HF_TOKEN`을 등록해 두시는 편이 좋습니다.
+
+### QLoRA 학습
+
+위의 zero-shot 추론은 bf16 가중치 62GB를 그대로 올리기 때문에 학습 활성값이 들어갈 자리가
+남지 않습니다. 가중치를 nf4로 양자화해서 올리고 LoRA adapter만 bf16으로 학습하면 같은 80GB
+A100에서 학습을 시작할 수 있습니다. 그 설정이 `configs/colab_gemma4_31b_nf4_lora.yaml`이며,
+bf16 설정과 다른 곳은 정밀도와 `weights_gb`, 그리고 양자화에서 제외할 모듈 목록 세 가지뿐입니다.
+모델 판과 `revision`, 시각 토큰 예산 1120, 프롬프트, LoRA와 학습 설정은 모두 같게 두었으므로
+두 결과를 같은 조건에서 견줄 수 있습니다.
+
+| 항목 | 값 |
+|---|---|
+| `precision` | `nf4` (compute dtype은 bf16이고 double quant를 켭니다) |
+| `weights_gb` | 17 (실측값이 아니라 어림값입니다. 아래 "실측으로 확인할 값"을 보십시오) |
+| `quant_skip_modules` | `model.vision_tower`, `model.embed_vision`, `lm_head` |
+
+vision 쪽을 양자화에서 제외하는 까닭은 다음과 같습니다. 이미지 특징을 뽑는 계층을 4bit로
+내리면 그 단계에서 이미 정보가 손실되고, 그 손실은 language 쪽에만 붙는 LoRA로 되돌릴 수
+없습니다. `lm_head`를 함께 적은 까닭은 따로 있습니다. transformers의 quantizer는
+`llm_int8_skip_modules`를 넘겨받으면 기본 제외 목록을 아예 쓰지 않으므로, 한 개라도 직접
+적으면서 `lm_head`를 빠뜨리면 출력 계층까지 4bit로 내려갑니다. `vqa/modeling.py`가 이 이름을
+자동으로 덧붙이기는 하지만, 설정 파일만 읽어도 무엇이 제외되는지 알 수 있도록 함께 적어
+두었습니다.
+
+#### 1번 절에서 바꿀 값
+
+```python
+CONFIG = GEMMA4_QLORA_CONFIG     # configs/colab_gemma4_31b_nf4_lora.yaml
+PROMPT_ID = "v2_read_text"       # 설정 파일에 적힌 프롬프트와 맞춥니다
+TRAIN_SCOPE = "fold0"            # 먼저 fold 1~4로 학습하고 fold 0으로 잽니다
+```
+
+`weights_gb`가 17이므로 5번 절이 학습 하한을 `max(70 × 17/54, 17 + 20) = 37.0GB`로 잡고,
+80GB A100에서 `TRAINING_ALLOWED`가 참이 됩니다. 설정 파일 자체가 nf4이므로 run-id의 기본
+이름에 있던 `_bf16`이 `_nf4`로 바뀌어 학습 run-id는 `gemma4_31b_ft_nf4_v2_read_text`가 되고,
+이미 결합에 쓰고 있는 bf16 zero-shot의 `gemma4_31b_base_bf16_v2_read_text`를 덮어쓰지
+않습니다. fold 0에서 판정을 마친 다음에 `TRAIN_SCOPE`를 `"full"`로 바꾸어 전체 데이터로 다시
+학습하십시오. 그때의 run-id는 `gemma4_31b_ft_nf4_full_v2_read_text`가 됩니다.
+
+#### 판정 기준
+
+학습 결과를 nf4 zero-shot과 견주면 안 됩니다. nf4는 가중치를 4bit로 뭉개므로 같은 모델이라도
+zero-shot 정확도가 bf16보다 낮게 나올 수 있고, 그렇게 낮아진 값을 기준으로 삼으면 양자화
+손실을 메운 것까지 학습의 성과로 계산하게 됩니다. 기준은 bf16 zero-shot이 fold 0에서 기록한
+0.9695이며, 이 값보다 0.005 이상, 즉 0.9745 이상이 나와야 결합 후보로 올립니다. 그만큼 오르지
+않는다면 LoRA가 양자화 손실을 메우지 못한 것이므로, Gemma 쪽 확률은 지금처럼 bf16 zero-shot을
+그대로 쓰는 편이 낫습니다.
+
+#### preflight에서 볼 항목
+
+| 검사 이름 | 확인할 내용 |
+|---|---|
+| `bitsandbytes_4bit` | 4bit 행렬곱의 순전파와 역전파가 도는지 봅니다. 이 검사가 FAIL이면 아래 항목을 볼 것도 없이 멈추고 bitsandbytes 설치부터 확인하십시오. |
+| `model_load` | 기록된 정밀도가 `nf4`인지, 그리고 어느 Auto 클래스가 받았는지 봅니다. Colab이 고정해 둔 transformers 5.16.1에서는 `AutoModelForImageTextToText`가 받습니다. |
+| `lora_targets` | `language_prefix`가 `model.language_model`로 잡히고 target이 410개인지 봅니다. bf16에서 잰 값과 같아야 합니다. 양자화된 계층은 `nn.Linear`가 아니라 `Linear4bit`이 되는데, `vqa/modeling.py`가 그 클래스 이름도 Linear로 인정하므로 개수가 줄어들면 안 됩니다. |
+| `forward_backward` | peak VRAM과 `sec_per_optimizer_step`을 봅니다. 아래 "실측으로 확인할 값"에 적은 두 가지를 이 검사에서 확인합니다. |
+| `label_mask` | 표본마다 감독하는 토큰이 정확히 한 개인지 봅니다. 정밀도를 바꾸어도 달라지지 않아야 하는 값이므로, 여기에서 어긋나면 양자화가 아니라 collator 쪽을 봐야 합니다. |
+| `inference` | 20문항을 실제로 추론해서 정확도와 문항당 시간을 봅니다. 이 20문항의 정확도가 bf16으로 잰 값보다 눈에 띄게 낮다면 양자화 손실이 큰 것이므로, 학습을 시작하기 전에 그 사실을 먼저 기록해 두십시오. |
+
+#### 실측으로 확인할 값
+
+`weights_gb`에 적은 17은 어림값입니다. 31B 가운데 vision tower 약 550M과 embedding을 뺀
+나머지 선형 계층이 4bit로 내려가면 약 15GB이고, 여기에 double quant의 상수와 4bit로
+내려가지 않는 embedding을 더해서 잡은 값입니다. 다만 peft의
+`prepare_model_for_kbit_training`이 4bit가 아닌 파라미터를 모두 fp32로 올리므로, 양자화에서
+제외한 vision tower와 embedding이 fp32로 상주하면서 실제 사용량은 이보다 몇 GB 더 커집니다.
+`forward_backward`가 보고하는 peak VRAM이 80GB에 가깝게 나온다면 `max_soft_tokens`를 560으로
+내리거나 `quant_skip_modules`에서 `model.vision_tower`를 빼고 다시 재 보십시오.
+
+#### 예상 소요 시간
+
+| 단계 | 예상 시간 |
+|---|---|
+| 가중치 내려받기 (62GB) | 4분에서 6분 (bf16 스냅샷을 그대로 받습니다) |
+| preflight (모델 적재와 4bit 검사까지) | 15분 안팎 |
+| LoRA 학습 (fold 1~4, 5,358문항, 1 epoch) | 4시간 30분에서 6시간 |
+| fold 0 추론 (1,344문항) | 50분에서 70분 |
+
+내려받는 파일은 nf4로 돌리더라도 원본 bf16 스냅샷 약 62GB입니다. 양자화는 스냅샷을 읽어서
+GPU에 올리는 시점에 수행하므로 캐시에 필요한 용량은 줄지 않습니다. 그런데 5-1절의 여유 공간
+검사는 `weights_gb`를 보고 필요한 용량을 계산하므로, 이 설정에서는 실제로 필요한 62GB가 아니라
+약 23GB만 있으면 통과합니다. 캐시 위치의 여유가 62GB에 못 미치면 검사를 통과하고도 내려받기가
+도중에 실패하므로, Drive 여유가 넉넉하지 않다면 `MODEL_CACHE`를 `"local"`로 적어서 가상 머신
+로컬 디스크에 받으십시오.
+
+학습 시간은 실측값이 아니라 두 가지 어림을 곱해서 잡은 값입니다. 27B 확대본이 microbatch
+하나에 1.5초가 걸렸는데, Gemma-4는 이미지 한 장이 시각 토큰 1,064개를 차지해서 sequence가 더
+길고, 4bit 가중치를 행렬곱마다 되돌리는 비용과 gradient checkpointing의 재계산 비용이 함께
+붙습니다. 그래서 microbatch 하나에 3초에서 4초가 걸린다고 보고, `micro_batch`가 1이므로
+5,358문항에 그대로 곱했습니다. 실제 값은 preflight의 `sec_per_optimizer_step`을
+`grad_accum`인 8로 나누어 확인하시고, 4시간을 크게 넘을 것 같으면
+`processor_kwargs.max_soft_tokens`를 560으로 내려서 다시 재 보십시오. 다만 예산을 내리면
+bf16 zero-shot과 조건이 달라지므로 위의 판정 기준을 그대로 쓸 수 없게 됩니다.
+
+#### 처음 돌려 보는 경로라는 점
+
+bitsandbytes와 Gemma-4를 함께 돌리는 것은 저희 파이프라인에서 실제 GPU로는 처음 시도하는
+경로입니다. nf4 경로 자체는 Qwen3.5-27B로 검증했고 Gemma-4는 bf16으로 검증했지만, 두 가지를
+겹친 조합은 아직 실행한 적이 없습니다. 특히 Gemma-4의 하이브리드 어텐션은 sliding window
+계층과 full attention 계층을 섞어 쓰고 뒤쪽 계층이 앞 계층의 k/v를 공유하는데, 이 구조가
+gradient checkpointing의 재계산과 어떻게 맞물릴지는 실행해 봐야 알 수 있습니다. 그러므로
+학습을 걸기 전에 preflight를 반드시 끝까지 돌리시고, `forward_backward`가 PASS인지 눈으로
+확인한 다음에 13번 절을 실행하십시오.

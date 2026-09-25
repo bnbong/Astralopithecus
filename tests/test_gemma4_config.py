@@ -130,3 +130,81 @@ def test_call_processor_reraises_when_images_are_already_nested():
 
     with pytest.raises(ValueError, match="boom"):
         collator_mod.call_processor(_AlwaysFails(), dict(text=["t0"], images=[["i0"]]))
+
+
+# --------------------------------------------------------------------------
+# NF4 QLoRA 학습 설정
+# --------------------------------------------------------------------------
+
+GEMMA4_QLORA_CONFIG = ROOT / "configs" / "colab_gemma4_31b_nf4_lora.yaml"
+
+
+def test_qlora_config_only_changes_the_precision_side():
+    """bf16 설정과 학습 조건이 같아야 두 결과를 견줄 수 있다."""
+    bf16 = config_mod.load_config(GEMMA4_CONFIG)
+    nf4 = config_mod.load_config(GEMMA4_QLORA_CONFIG)
+    assert config_mod.get_path(nf4, "precision") == "nf4"
+    assert config_mod.get_path(nf4, "weights_gb") == 17
+    for key in (
+        "model_id",
+        "revision",
+        "attn_implementation",
+        "prompt_id",
+        "min_pixels",
+        "max_pixels",
+        "processor_kwargs.max_soft_tokens",
+        "lora.r",
+        "lora.alpha",
+        "lora.dropout",
+        "lora.targets",
+        "train.lr",
+        "train.epochs",
+        "train.micro_batch",
+        "train.grad_accum",
+        "train.seed",
+    ):
+        assert config_mod.get_path(nf4, key) == config_mod.get_path(bf16, key), key
+
+
+def test_qlora_config_excludes_the_vision_side_from_quantization():
+    """vision 을 4bit 로 내리면 이미지 특징이 먼저 뭉개지고 LoRA 로 되돌릴 수 없다."""
+    cfg = config_mod.load_config(GEMMA4_QLORA_CONFIG)
+    skip = config_mod.get_path(cfg, "quant_skip_modules")
+    assert skip == ["model.vision_tower", "model.embed_vision", "lm_head"]
+    # 설정을 읽지 않는 bf16 판에는 이 키가 없어야 한다. 있으면 config_hash 가 달라진다.
+    assert config_mod.get_path(config_mod.load_config(GEMMA4_CONFIG), "quant_skip_modules") is None
+
+
+def test_quant_skip_modules_must_be_a_list_of_names():
+    with pytest.raises(config_mod.ConfigError, match="quant_skip_modules"):
+        config_mod.load_config(GEMMA4_QLORA_CONFIG, ["quant_skip_modules=lm_head"])
+    with pytest.raises(config_mod.ConfigError, match="quant_skip_modules"):
+        config_mod.load_config(GEMMA4_QLORA_CONFIG, ['quant_skip_modules=["", "lm_head"]'])
+
+
+def test_nf4_training_fits_in_eighty_gigabytes():
+    """21번 노트북 5번 절의 하한 계산을 그대로 옮겨 적은 것이다."""
+    weights_gb = float(config_mod.get_path(config_mod.load_config(GEMMA4_QLORA_CONFIG), "weights_gb"))
+    train_min = round(max(70.0 * (weights_gb / 54.0), weights_gb + 20.0), 1)
+    assert train_min == 37.0
+    assert train_min <= 80.0
+    # 같은 모델의 bf16 판은 여전히 막혀 있어야 한다.
+    bf16_weights = float(config_mod.get_path(config_mod.load_config(GEMMA4_CONFIG), "weights_gb"))
+    assert round(max(70.0 * (bf16_weights / 54.0), bf16_weights + 20.0), 1) > 80.0
+
+
+def test_qlora_config_hash_differs_from_the_bf16_config():
+    """정밀도가 다른 두 run 이 같은 checkpoint 를 이어받으면 안 된다."""
+    bf16 = config_mod.load_config(GEMMA4_CONFIG)
+    nf4 = config_mod.load_config(GEMMA4_QLORA_CONFIG)
+    assert config_mod.config_hash(bf16) != config_mod.config_hash(nf4)
+    # 양자화 제외 목록도 학습 결과를 바꾸므로 해시에 들어가야 한다.
+    without_vision = config_mod.load_config(
+        GEMMA4_QLORA_CONFIG, ['quant_skip_modules=["lm_head"]']
+    )
+    assert config_mod.config_hash(nf4) != config_mod.config_hash(without_vision)
+
+
+def test_qlora_config_keeps_the_gemma4_run_id_prefix():
+    cfg = config_mod.load_config(GEMMA4_QLORA_CONFIG)
+    assert config_mod.run_id_prefix(config_mod.get_path(cfg, "model_id")) == "gemma4_31b"

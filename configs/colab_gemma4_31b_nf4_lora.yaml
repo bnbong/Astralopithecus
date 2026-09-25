@@ -1,0 +1,95 @@
+# Colab Pro+ A100 80GB / transformers 5.x / Gemma-4-31B-it NF4 QLoRA 학습.
+#
+# 목적: colab_gemma4_31b_bf16.yaml 의 zero-shot 추론이 fold 0 에서 0.9695 를 냈고, 27B LoRA
+# 모델과 틀리는 문항이 달라서 A+B+Gemma 균등 결합이 Public 0.97348 을 냈다. 그 Gemma 쪽을
+# zero-shot 이 아니라 LoRA 로 학습한 모델로 바꾸면 결합이 한 번 더 올라갈 여지가 있다.
+# 그런데 bf16 가중치가 62GB 라서 80GB A100 에서는 학습 활성값이 들어가지 않는다(21번 노트북
+# 5번 절의 bf16 학습 하한이 82GB 다). 그래서 이 설정은 가중치를 nf4 로 양자화해서 올리고
+# LoRA adapter 만 bf16 으로 학습한다. 파이프라인은 precision nf4 를 이미 지원한다
+# (vqa/modeling.py 의 quantization_config 와 prepare_for_training, preflight 의
+# bitsandbytes_4bit 검사가 PASS 였다).
+#
+# 일정: 2026-09-26 밤에 fold 1234 로 학습해서 fold 0 으로 재고, 쓸 만하면 2026-09-27 에
+# 전체 데이터(TRAIN_SCOPE = "full")로 다시 학습한다.
+#
+# 판정 기준(중요): nf4 는 가중치를 4bit 로 뭉개므로 같은 모델이라도 zero-shot 정확도가
+# bf16 보다 낮게 나올 수 있다. 그래서 "nf4 zero-shot 대비 올랐는가" 로 판정하면 안 된다.
+# 이 설정의 학습 결과는 bf16 zero-shot 의 fold 0 정확도 0.9695 와 견주고, 그보다 최소한
+# 0.005(+5 포인트, 즉 0.9745 이상)는 올라야 결합 후보로 올린다. 그만큼 오르지 않으면
+# 양자화 손실을 LoRA 가 메우지 못한 것이므로 bf16 zero-shot 확률을 그대로 쓰는 편이 낫다.
+#
+# bf16 설정과 다른 곳은 precision, weights_gb, quant_skip_modules 세 가지뿐이다. 모델 판과
+# revision, 시각 토큰 예산 1120, 프롬프트 v2_read_text, LoRA 와 train 설정은 그대로 두었다.
+# 그래야 학습 결과와 bf16 zero-shot 을 같은 조건에서 견줄 수 있다.
+#
+# 캐시 용량 주의: nf4 로 돌리더라도 내려받는 파일은 원본 bf16 스냅샷 약 62GB 다. 21번 노트북
+# 5-1절의 여유 공간 검사는 weights_gb 를 보고 필요한 용량을 계산하므로 이 설정에서는 약 23GB
+# 만 있으면 통과한다. 캐시 위치의 여유가 62GB 에 못 미치면 검사를 지나고도 내려받기가 도중에
+# 실패하므로, Drive 여유가 넉넉하지 않으면 파라미터 셀의 MODEL_CACHE 를 "local" 로 적으십시오.
+#
+# 가중치 크기: 아래 weights_gb 17 은 실측값이 아니라 어림값이다. 31B 가운데 vision tower
+# 약 550M 과 embedding 을 뺀 나머지 선형 계층이 4bit 로 내려가면 약 15GB 이고, 여기에
+# double quant 의 상수와 4bit 로 내려가지 않는 embedding 을 더해 17 로 잡았다. 다만
+# peft 의 prepare_model_for_kbit_training 이 4bit 가 아닌 파라미터를 모두 fp32 로 올리므로
+# (embedding 약 1.4B 과 아래에서 양자화를 제외한 vision tower 가 여기에 해당한다) 실제
+# 상주량은 이보다 몇 GB 더 크다. 21번 노트북 5번 절은 이 값으로 학습 하한을
+# max(70 * 17/54, 17 + 20) = 37.0GB 로 잡으므로 80GB A100 에서 학습이 허용된다. 정확한
+# 값은 preflight 의 forward_backward 가 재는 peak VRAM 으로 확인하십시오.
+model_id: google/gemma-4-31B-it
+revision: 842da3794eaa0b77d5f08bae87a17459d91ff475   # bf16 설정과 같은 커밋이어야 비교가 성립한다
+model_path: null          # 오프라인이면 로컬 스냅샷 디렉터리를 여기에 적는다
+precision: nf4
+attn_implementation: sdpa
+
+# nf4 로 올렸을 때의 어림 가중치 크기(GB). 위 주석을 보라.
+weights_gb: 17
+
+# 양자화에서 제외할 모듈이다. vision tower 를 4bit 로 내리면 이미지 특징이 먼저 뭉개지고,
+# 그 손실은 language 쪽 LoRA 로 되돌릴 수 없다. Gemma-4 를 meta device 에 올려 확인한
+# 최상위 이름이 model.vision_tower 와 model.embed_vision 이므로 두 이름을 그대로 적는다.
+# lm_head 를 함께 적는 까닭은 transformers 의 quantizer 가 llm_int8_skip_modules 를 받으면
+# 기본 제외 목록(get_keys_to_not_convert)을 아예 쓰지 않기 때문이다. 적지 않으면 lm_head 가
+# 4bit 로 내려간다. vqa/modeling.py 가 lm_head 를 자동으로 덧붙이기는 하지만, 설정 파일만
+# 읽어도 무엇이 제외되는지 알 수 있도록 여기에도 적어 둔다.
+quant_skip_modules:
+  - model.vision_tower
+  - model.embed_vision
+  - lm_head
+
+# Gemma4 의 시각 토큰 예산. bf16 설정과 같은 1120 을 쓴다. 학습이 너무 느리면 560 으로
+# 내릴 수 있지만, 그러면 bf16 zero-shot 과 조건이 달라져서 위의 판정 기준을 쓸 수 없다.
+processor_kwargs:
+  max_soft_tokens: 1120
+
+# 이 모델에서는 쓰이지 않는다. 스키마를 맞추기 위한 값이며 bf16 설정과 같다.
+min_pixels: 179200         # 시각 토큰 70개에 대응하는 대략적인 픽셀 수
+max_pixels: 2867200        # 시각 토큰 1120개에 대응하는 대략적인 픽셀 수
+
+prompt_id: v2_read_text
+
+# lora.targets auto 는 model.language_model 아래에서 410개를 찾는다. vision 쪽은 한 개도
+# 잡지 않으며, 위에서 vision 을 양자화 제외로 두었더라도 학습 대상이 되지는 않는다.
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  targets: auto
+
+train:
+  lr: 1.0e-4
+  epochs: 1
+  micro_batch: 1
+  grad_accum: 8
+  warmup_ratio: 0.03
+  scheduler: linear
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  seed: 42
+  shuffle_options: true
+  save_every_steps: 50
+  save_every_minutes: 15
+  keep_last: 2
+
+infer:
+  batch_size: 1
+  save_every_items: 50

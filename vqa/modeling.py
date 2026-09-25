@@ -177,23 +177,52 @@ def is_oom_error(exc: BaseException) -> bool:
     return "out of memory" in str(exc).lower()
 
 
-def quantization_config(precision: str) -> Any | None:
-    """precision 문자열에 맞는 BitsAndBytesConfig. bf16이면 None."""
+#: `quant_skip_modules`를 지정했을 때 반드시 함께 제외해야 하는 모듈.
+#: transformers의 quantizer는 `llm_int8_skip_modules`가 None일 때에만 기본 제외 목록
+#: (`get_keys_to_not_convert`, 보통 lm_head와 tied weight)을 쓴다. 한 개라도 직접 적으면
+#: 기본 목록을 버리므로, 적은 사람이 lm_head를 빠뜨리면 출력 계층까지 4bit로 내려간다.
+DEFAULT_QUANT_SKIP_MODULES: tuple[str, ...] = ("lm_head",)
+
+
+def resolve_quant_skip_modules(skip_modules: Iterable[str] | None) -> list[str] | None:
+    """설정의 `quant_skip_modules`를 quantizer에 넘길 목록으로 바꾼다.
+
+    비어 있으면 None을 돌려주어 transformers의 기본 동작을 그대로 쓰게 한다. 값이 있으면
+    `DEFAULT_QUANT_SKIP_MODULES`를 덧붙인다. 위 상수의 주석에 그 까닭을 적어 두었다.
+    """
+    names = [str(name) for name in (skip_modules or []) if str(name).strip()]
+    if not names:
+        return None
+    for name in DEFAULT_QUANT_SKIP_MODULES:
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def quantization_config(precision: str, skip_modules: Iterable[str] | None = None) -> Any | None:
+    """precision 문자열에 맞는 BitsAndBytesConfig. bf16이면 None.
+
+    `skip_modules`는 양자화에서 제외할 모듈 이름이다. Gemma-4처럼 vision tower를 4bit로
+    내리면 이미지 특징이 먼저 뭉개지는 모델에서 `model.vision_tower` 같은 이름을 넘긴다.
+    이름은 전체 경로의 접두사이거나 leaf 이름이면 되고, transformers가 정규식으로도 본다.
+    """
     precision = precision.lower()
     if precision == "bf16":
         return None
     import torch
     from transformers import BitsAndBytesConfig
 
+    skip = resolve_quant_skip_modules(skip_modules)
     if precision == "nf4":
         return BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_use_double_quant=True,
+            llm_int8_skip_modules=skip,
         )
     if precision == "int8":
-        return BitsAndBytesConfig(load_in_8bit=True)
+        return BitsAndBytesConfig(load_in_8bit=True, llm_int8_skip_modules=skip)
     raise ValueError(f"알 수 없는 precision: {precision!r}")
 
 
@@ -217,7 +246,7 @@ def load_base_model(cfg: dict[str, Any], *, source: str | None = None, for_train
     if torch.cuda.is_available():
         kwargs["device_map"] = {"": 0}
 
-    quant = quantization_config(precision)
+    quant = quantization_config(precision, config_mod.get_path(cfg, "quant_skip_modules"))
     if quant is not None:
         kwargs["quantization_config"] = quant
 

@@ -14,9 +14,15 @@
     python check_submission.py --submission blend27b9b_w05_submission.csv \
         --sample data/sample_submission.csv --test data/test.csv
 
+    # 3) 세 모델 결합 (A + B + Gemma). --w-c 로 C 의 가중치만 정하면 나머지를 A 와 B 가 반씩 나눈다.
+    python blend_preds.py --a <A test 예측> --b <B test 예측> --c <Gemma test 예측> --w-c 0.4 \
+        --sample data/sample_submission.csv --submission blend_abg_submission.csv
+
 입력 예측 파일: id 와 확률 4개 컬럼(p_a~p_d 또는 prob_a~prob_d) 이 있으면 된다. 다른 컬럼은 무시한다.
 id 는 .jpg 유무와 상관없이 같은 id 로 취급한다. 제출 파일의 id 는 sample_submission 의 표기를 그대로 쓴다.
 결합식: 확률 = w_a * A + (1 - w_a) * B  (가중치는 검증에서 세밀하게 고르지 말고 미리 정한 값을 쓸 것)
+--c 로 세 번째 파일을 주면 기본값은 균등 가중치(각 1/3)이고, --w-c 로 C 의 가중치만 정하면
+나머지 (1 - w_c) 를 A 와 B 가 반씩 나눈다. 세 파일을 넣을 때 --w-a 는 쓸 수 없다.
 """
 import argparse
 import os
@@ -63,53 +69,72 @@ def main():
     ap = argparse.ArgumentParser(description="두 모델 확률 결합")
     ap.add_argument("--a", required=True, help="예측 파일 A (예: 27B)")
     ap.add_argument("--b", required=True, help="예측 파일 B (예: 9B)")
-    ap.add_argument("--w-a", type=float, default=0.5, help="A 의 가중치 (B 는 1-w)")
+    ap.add_argument("--c", default=None, help="예측 파일 C (선택). 주면 A 와 B 와 C 를 균등 가중치로 평균한다")
+    ap.add_argument("--w-a", type=float, default=None, help="A 의 가중치 (B 는 1-w, 기본값 0.5). --c 와 함께 쓸 수 없다")
+    ap.add_argument("--w-c", type=float, default=None, help="C 의 가중치 (기본값 1/3). 나머지는 A 와 B 가 반씩 나눈다")
     ap.add_argument("--name-a", default="A")
     ap.add_argument("--name-b", default="B")
+    ap.add_argument("--name-c", default="C")
     ap.add_argument("--sample", default=None, help="sample_submission.csv (제출 파일을 만들 때 필요, id 기준)")
     ap.add_argument("--labels", default=None, help="정답이 있는 train.csv (fold 0 재현 확인용)")
     ap.add_argument("--out-probs", default=None, help="결합 확률 csv (id, pred, prob_a~d)")
     ap.add_argument("--submission", default=None, help="제출 csv (id, answer)")
     args = ap.parse_args()
-    if not 0.0 <= args.w_a <= 1.0:
+    if args.c is not None and args.w_a is not None:
+        sys.exit("[오류] --c 로 세 파일을 결합할 때는 --w-a 대신 --w-c 로 C 의 가중치만 정합니다.")
+    if args.c is None and args.w_c is not None:
+        sys.exit("[오류] --w-c 는 --c 로 세 번째 파일을 줄 때만 쓸 수 있습니다.")
+    w_a = 0.5 if args.w_a is None else args.w_a
+    if not 0.0 <= w_a <= 1.0:
         sys.exit("[오류] --w-a 는 0~1 사이여야 합니다.")
+    w_c = 1.0 / 3 if args.w_c is None else args.w_c
+    if not 0.0 <= w_c <= 1.0:
+        sys.exit("[오류] --w-c 는 0~1 사이여야 합니다.")
     if args.submission and not args.sample:
         sys.exit("[오류] 제출 파일을 만들려면 --sample 이 필요합니다.")
 
-    A, B = load_probs(args.a, args.name_a), load_probs(args.b, args.name_b)
+    frames = [(args.name_a, load_probs(args.a, args.name_a)), (args.name_b, load_probs(args.b, args.name_b))]
+    if args.c is not None:
+        frames.append((args.name_c, load_probs(args.c, args.name_c)))
+    names = [name for name, _ in frames]
+    if args.c is None:
+        weights = [w_a, 1.0 - w_a]
+    else:
+        weights = [(1.0 - w_c) / 2, (1.0 - w_c) / 2, w_c]
     pc = [f"prob_{c}" for c in LETTERS]
 
     if args.sample:
         s = pd.read_csv(args.sample, dtype=str, keep_default_na=False, encoding="utf-8-sig")
         order = list(s["id"])
         nids = [norm_id(x) for x in order]
-        miss_a, miss_b = set(nids) - set(A.index), set(nids) - set(B.index)
-        if miss_a or miss_b:
-            sys.exit(f"[오류] sample 의 id 중 {args.name_a}에 없는 것 {len(miss_a)}개, {args.name_b}에 없는 것 {len(miss_b)}개 "
-                     f"(예: {sorted(miss_a | miss_b)[:3]}). 추론이 끝까지 안 됐거나 다른 파일일 수 있어요.")
-        extra = (set(A.index) | set(B.index)) - set(nids)
+        missing = [(name, set(nids) - set(df.index)) for name, df in frames]
+        if any(miss for _, miss in missing):
+            every = sorted(set().union(*(miss for _, miss in missing)))
+            sys.exit("[오류] sample 의 id 중 " + ", ".join(f"{name}에 없는 것 {len(miss)}개" for name, miss in missing)
+                     + f" (예: {every[:3]}). 추론이 끝까지 안 됐거나 다른 파일일 수 있어요.")
+        extra = set().union(*(set(df.index) for _, df in frames)) - set(nids)
         if extra:
             print(f"[경고] sample 에 없는 id 가 {len(extra)}개 있어 제외합니다 (예: {sorted(extra)[:3]}).")
         ids_out = dict(zip(nids, order))
     else:
-        nids = [i for i in A.index if i in B.index]
-        if len(nids) != len(A) or len(nids) != len(B):
-            print(f"[경고] 공통 id {len(nids)}개만 결합합니다 (A {len(A)}개, B {len(B)}개).")
-        ids_out = {n: A.loc[n, "id"] for n in nids}
+        first = frames[0][1]
+        nids = [i for i in first.index if all(i in df.index for _, df in frames[1:])]
+        if any(len(nids) != len(df) for _, df in frames):
+            detail = ", ".join(f"{name} {len(df)}개" for name, df in frames)
+            print(f"[경고] 공통 id {len(nids)}개만 결합합니다 ({detail}).")
+        ids_out = {n: first.loc[n, "id"] for n in nids}
         order = [ids_out[n] for n in nids]
 
-    pa = A.loc[nids, pc].values
-    pb = B.loc[nids, pc].values
-    blend = args.w_a * pa + (1 - args.w_a) * pb
-    pred_a = [LETTERS[i] for i in pa.argmax(1)]
-    pred_b = [LETTERS[i] for i in pb.argmax(1)]
+    mats = [df.loc[nids, pc].values for _, df in frames]
+    blend = sum(w * m for w, m in zip(weights, mats))
+    preds = [[LETTERS[i] for i in m.argmax(1)] for m in mats]
     pred = [LETTERS[i] for i in blend.argmax(1)]
 
     n = len(nids)
-    print(f"결합 문항 수: {n} | 가중치 {args.name_a} {args.w_a:.2f} + {args.name_b} {1 - args.w_a:.2f}")
-    print(f"{args.name_a}와 {args.name_b}의 예측이 같은 문항: {sum(x == y for x, y in zip(pred_a, pred_b))}/{n}")
-    print(f"결합 결과가 {args.name_a}와 다른 문항: {sum(x != y for x, y in zip(pred, pred_a))} | "
-          f"{args.name_b}와 다른 문항: {sum(x != y for x, y in zip(pred, pred_b))}")
+    print(f"결합 문항 수: {n} | 가중치 " + " + ".join(f"{name} {w:.2f}" for name, w in zip(names, weights)))
+    print(f"{'와 '.join(names)}의 예측이 같은 문항: {sum(len(set(row)) == 1 for row in zip(*preds))}/{n}")
+    print("결합 결과가 " + " | ".join(f"{name}와 다른 문항: {sum(x != y for x, y in zip(pred, p))}"
+                                     for name, p in zip(names, preds)))
     dist = pd.Series(pred).value_counts(normalize=True).reindex(LETTERS, fill_value=0)
     print("결합 예측 분포:", ", ".join(f"{c}={dist[c]:.1%}" for c in LETTERS))
 
@@ -120,7 +145,8 @@ def main():
         if have:
             def acc(p):
                 return sum(p[i] == gold[nids[i]] for i in have) / len(have)
-            print(f"[정확도 확인 {len(have)}문항] {args.name_a} {acc(pred_a):.4f} | {args.name_b} {acc(pred_b):.4f} | 결합 {acc(pred):.4f}")
+            parts = [f"{name} {acc(p):.4f}" for name, p in zip(names, preds)]
+            print(f"[정확도 확인 {len(have)}문항] " + " | ".join(parts) + f" | 결합 {acc(pred):.4f}")
         else:
             print("[정확도 확인] 정답이 있는 id 가 없습니다 (test 는 정답이 없어요).")
 
