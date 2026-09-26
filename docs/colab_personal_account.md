@@ -395,3 +395,16 @@ bitsandbytes와 Gemma-4를 함께 돌리는 것은 저희 파이프라인에서 
 gradient checkpointing의 재계산과 어떻게 맞물릴지는 실행해 봐야 알 수 있습니다. 그러므로
 학습을 걸기 전에 preflight를 반드시 끝까지 돌리시고, `forward_backward`가 PASS인지 눈으로
 확인한 다음에 13번 절을 실행하십시오.
+
+### InternVL3.5-38B QLoRA 시도 결과 (기각)
+
+같은 nf4 경로로 네 번째 계열인 InternVL3.5-38B-HF도 한 번 학습했습니다. 파라미터 셀에는
+`CONFIG = INTERNVL38_QLORA_CONFIG`와 `MODEL_CACHE = "local"`을 적었는데, 여기에서 `MODEL_CACHE`를
+`"local"`로 두는 일은 선택이 아니라 필수입니다. nf4로 돌리더라도 내려받는 파일은 원본 bf16
+스냅샷 76.8GB 그대로인 반면, 5-1절의 여유 공간 검사는 `weights_gb` 45를 보고 약 54.7GB만
+요구하므로 Drive에 받으면 검사를 통과하고도 내려받기가 도중에 실패합니다. 학습은 670 step을
+optimizer step당 32.6초로 돌려 6시간 6분이 걸렸고(UTC 2026-09-26 09:26:30 시작, 15:32:05 종료),
+peak VRAM은 52.9GB, 마지막 loss의 EMA는 0.155였습니다. 설정 파일의 어림값이 약 42초/step에 peak
+55GB에서 57GB였으므로 예상보다 빠르고 가볍게 끝났습니다. 다만 fold 0 정확도가 0.9315(1252/1344)로
+사전 판정 기준 0.9635에 크게 못 미쳤고 결합에서도 이득이 없어서 기각했으며, test 추론은 수행하지
+않았습니다. 자세한 수치는 `results/README.md`의 "2026-09-27 InternVL3.5-38B QLoRA" 절에 있습니다.
