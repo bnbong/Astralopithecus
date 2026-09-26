@@ -2571,6 +2571,18 @@ adapter를 빌려 옵니다. epoch을 2로 올렸을 때 실제로 좋아지는�
 bf16보다 낮게 나올 수 있고, 그 낮아진 값을 기준으로 삼으면 학습이 실제로 도움이 되었는지
 판단할 수 없기 때문입니다.
 
+네 번째 계통인 InternVL3.5-38B를 학습하려면 `CONFIG = INTERNVL38_QLORA_CONFIG` 라고 적고
+`PROMPT_ID` 를 `"v2_read_text"` 로 두십시오. 시각 인코더가 InternViT-6B이고 언어 backbone이
+Qwen3-32B여서 Qwen 계열과도 Gemma 계열과도 다릅니다. Gemma QLoRA와 같은 방식으로 가중치를
+nf4로 올리고 LoRA adapter만 학습하며, 양자화에서 `model.vision_tower` 와
+`model.multi_modal_projector` 와 `lm_head` 를 제외합니다. `weights_gb` 가 45라서 학습 하한이
+65.0GB이고, 80GB A100에서만 학습이 허용됩니다. 해상도는 설정 파일의
+`processor_kwargs.max_patches` 로 정하며 4로 두었습니다. 타일 5장에 시각 토큰 1,280개이고
+학습은 670 step에 약 7.8시간을 예상합니다. 처음 20 step의 평균이 50초를 넘으면 하룻밤에
+끝나지 않으므로 그 자리에서 멈추고 `max_patches` 를 2로 내려 다시 거십시오. 내려받는 원본
+스냅샷이 76.8GB인데 5-1절의 여유 공간 검사는 54.7GB만 보므로, `MODEL_CACHE` 를 `"local"` 로
+적고 5번 절이 찍는 캐시 여유가 85GB 이상인지 먼저 확인하십시오.
+
 `MODEL_CACHE` 는 27B 가중치를 어디에 둘지 정합니다. 기본값인 `"auto"` 는 20번 노트북이 남긴
 캐시를 먼저 찾고, 없으면 Drive 여유가 `MODEL_CACHE_NEED_GB` 이상일 때에만 Drive를 씁니다.
 개인 계정처럼 Drive 용량이 부족한 상황이라면 `"local"` 로 적어서 가상 머신의 로컬 디스크에
@@ -2676,7 +2688,18 @@ GEMMA4_CONFIG = "configs/colab_gemma4_31b_bf16.yaml"
 # gemma4_31b_ft_nf4_v2_read_text 가 되며, bf16 zero-shot 결과와 섞이지 않습니다.
 # 학습 결과는 nf4 zero-shot 이 아니라 bf16 zero-shot 의 fold 0 정확도 0.9695 와 견주십시오.
 GEMMA4_QLORA_CONFIG = "configs/colab_gemma4_31b_nf4_lora.yaml"
-CONFIG = ""                       # 비워 두면 아래 셀이 정책과 VRAM을 보고 정합니다. 직접 적으면 그 값을 씁니다.
+# InternVL3.5-38B-HF 를 nf4 로 올리고 LoRA adapter 만 학습하는 설정입니다. Qwen 계열과
+# Gemma 계열에 이어 네 번째 계통이며, 시각 인코더가 InternViT-6B, 언어 backbone 이
+# Qwen3-32B 입니다. 쓰려면 CONFIG = INTERNVL38_QLORA_CONFIG 라고 적고 PROMPT_ID 를
+# "v2_read_text" 로 맞추십시오. 설정 파일이 nf4 이므로 run-id 의 "_bf16" 이 "_nf4" 로
+# 바뀌어 internvl35_38b_ft_nf4_v2_read_text 가 되며, 8B zero-shot 결과와 섞이지 않습니다.
+# weights_gb 가 45 여서 5번 절의 학습 하한은 65.0GB 입니다. 80GB A100 에서만 학습이
+# 허용되고 40GB A100 에서는 막힙니다.
+# 주의: 내려받는 원본 스냅샷이 76.8GB 입니다. 5-1절의 여유 공간 검사는 weights_gb 로
+# 계산해서 54.7GB 만 보므로, 통과하고도 내려받기가 도중에 실패할 수 있습니다. MODEL_CACHE
+# 를 "local" 로 적고 5번 절이 찍는 캐시 여유가 85GB 이상인지 먼저 확인하십시오.
+INTERNVL38_QLORA_CONFIG = "configs/colab_internvl35_38b_nf4_lora.yaml"
+CONFIG = ""                     # 비워 두면 아래 셀이 정책과 VRAM을 보고 정합니다. 직접 적으면 그 값을 씁니다.
 PROMPT_ID = "v1_image_only"       # 학습과 추론이 모두 이 프롬프트를 씁니다.
 
 # --- run-id의 기본 이름 ---

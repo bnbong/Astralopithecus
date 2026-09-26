@@ -285,6 +285,10 @@ RUN_ID_PREFIX_BY_MODEL: dict[str, str] = {
     # InternVL3.5-8B는 27B와 계통이 다른 비교 실험용 모델이다. 예측이 27B run 폴더에 섞이면
     # 결합할 때 어느 쪽 확률인지 구분할 수 없으므로 앞머리를 따로 둔다.
     "internvl3_5-8b-hf": "internvl35_8b",
+    # InternVL3.5-38B는 8B와 언어 backbone(Qwen3-32B)도 시각 인코더(InternViT-6B) 크기도
+    # 달라서 8B run 폴더와도 갈라 둔다. 두 판의 예측을 한 폴더에 섞으면 결합할 때 어느
+    # 쪽 확률인지 구분할 수 없다.
+    "internvl3_5-38b-hf": "internvl35_38b",
     # Qwen3-VL-32B-Instruct는 3.5/3.8 계열과 구조도 크기도 달라서 앞머리를 따로 둔다.
     "qwen3-vl-32b-instruct": "qwen3vl_32b",
     # Gemma-4-31B-it는 Qwen 계열과도 InternVL 계열과도 다른 세 번째 계통이다. base 판과

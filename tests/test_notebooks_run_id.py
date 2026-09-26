@@ -373,3 +373,50 @@ def test_notebook_training_allows_the_nf4_gemma_config():
     assert round(max(70.0 * (weights_gb / 54.0), weights_gb + 20.0), 1) == 37.0
     assert round(35.0 * (weights_gb / 54.0), 1) <= 80.0
     assert "upscale" not in Path(GEMMA4_QLORA_CONFIG).stem
+
+
+# --------------------------------------------------------------------------
+# InternVL3.5-38B QLoRA (네 번째 계통)
+# --------------------------------------------------------------------------
+
+INTERNVL38_QLORA_CONFIG = "configs/colab_internvl35_38b_nf4_lora.yaml"
+INTERNVL8_CONFIG = "configs/colab_internvl35_8b_bf16.yaml"
+
+
+def test_internvl38_qlora_run_ids_say_nf4():
+    base, ft = derive_run_ids_by_precision(INTERNVL38_QLORA_CONFIG, prompt_id="v2_read_text")
+    assert base == "internvl35_38b_base_nf4_v2_read_text"
+    assert ft == "internvl35_38b_ft_nf4_v2_read_text"
+    assert derive_run_ids_by_precision(
+        INTERNVL38_QLORA_CONFIG, prompt_id="v2_read_text", train_scope="full"
+    )[1] == "internvl35_38b_ft_nf4_full_v2_read_text"
+
+
+def test_internvl38_never_shares_a_run_folder_with_the_eight_b_or_the_qwen_runs():
+    """8B zero-shot 예측은 이미 결합 실험에 쓴 값이므로 덮어쓰이면 안 된다."""
+    thirty_eight = set(derive_run_ids_by_precision(INTERNVL38_QLORA_CONFIG, prompt_id="v2_read_text"))
+    for other in (INTERNVL8_CONFIG, BF16_CONFIG, UPSCALE_CONFIG, QWEN38_UPSCALE_CONFIG,
+                  QWEN3VL_CONFIG, GEMMA4_CONFIG, GEMMA4_QLORA_CONFIG):
+        assert not thirty_eight & set(
+            derive_run_ids_by_precision(other, prompt_id="v2_read_text")
+        ), other
+
+
+def test_notebook_offers_the_internvl38_qlora_config():
+    assert 'INTERNVL38_QLORA_CONFIG = "%s"' % INTERNVL38_QLORA_CONFIG in notebook_source()
+
+
+def test_notebook_training_allows_the_internvl38_config():
+    """weights_gb 45 면 학습 하한이 65.0GB 라서 80GB A100 에서만 학습이 허용되어야 한다."""
+    cfg = config_mod.load_config(ROOT / INTERNVL38_QLORA_CONFIG)
+    weights_gb = float(config_mod.get_path(cfg, "weights_gb"))
+    scale = weights_gb / 54.0
+    # 5번 절이 학습을 막는 조건은 bf16 설정이거나 확대본일 때뿐이고, 이 설정은 둘 다 아니다.
+    assert str(config_mod.get_path(cfg, "precision")) == "nf4"
+    assert "upscale" not in Path(INTERNVL38_QLORA_CONFIG).stem
+    # 그래도 하한 자체가 80GB 안에 들어와야 한다. 40GB 가상 머신은 VRAM_MIN_TRAIN_GB 가 아니라
+    # 이 값으로 걸러진다고 보는 편이 안전하다.
+    assert round(max(70.0 * scale, weights_gb + 20.0), 1) == 65.0
+    assert round(35.0 * scale, 1) <= 80.0
+    # 정밀도를 한 번 더 내리는 경로에 들어가지 않아야 한다. 80GB A100 의 bf16 추론 하한이 57GB다.
+    assert round(weights_gb + 12.0, 1) == 57.0
