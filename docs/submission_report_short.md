@@ -38,12 +38,15 @@
 | 순위 | 후보 | 구성 | Public | 제출 파일 sha256 |
 |---|---|---|---|---|
 | 1순위 | ⑳ | A 0.3 + B 0.3 + Gemma QLoRA 0.4의 확률 가중 평균 결합 | 0.97765 | `31f51fe5c1cd0523f5f7c7fac12fa33398b34b4976aa66b62fa4ea343e101841` |
-| 2순위 | ⑲ | A 0.3 + B 0.3 + Gemma zero-shot 0.4의 확률 가중 평균 결합 | 0.97616 | `e6a9d531b467ac8f17be7a9b33bc65b6ef0090b8a2006e4d5b808a03b0fa15fd` |
+| 2순위 | ㉒ | A 0.3 + B 0.3 + Gemma fold 0 QLoRA 0.2 + Gemma 전체 QLoRA 0.2의 확률 가중 평균 결합 | 0.97765 (⑳과 동점) | `928fcb211a5451d07b19d7bd3b06bd6bd9d85f73411fd59de18896a2597168f2` |
 
-두 제출물은 가중치가 똑같고 세 번째 재료로 Gemma의 QLoRA 학습 모델을 쓰는지 zero-shot 모델을 쓰는지만 다릅니다. 공통 재료인 A와 B는 모두 Qwen3.5-27B를
-bf16으로 올리고 프롬프트 `v2_read_text`와 이미지 확대 설정으로 answer-only LoRA를 학습한 모델입니다. 2순위를 Public 점수가 더 높은
-㉓(0.97676)이 아니라 ⑲로 둔 까닭은, 2순위가 1순위를 대비하는 보험 자리이므로 1순위와 예측이 가장 많이 다른 제출물을 두는 편이 낫다고 보았기 때문입니다. ⑲는 ⑳과 답이
-갈린 문항이 43개인 반면 ㉓은 28개에 그칩니다.
+두 제출물은 A와 B의 가중치가 똑같고, Gemma 재료를 fold 0 QLoRA 모델 하나로 쓰는지 fold 0과 전체 데이터를 각각 학습한 두 QLoRA 모델의 평균으로 쓰는지만
+다릅니다. 공통 재료인 A와 B는 모두 Qwen3.5-27B를 bf16으로 올리고 프롬프트 `v2_read_text`와 이미지 확대 설정으로 answer-only LoRA를 학습한
+모델입니다. 2순위를 ⑲(0.97616)가 아니라 ㉒로 둔 까닭은 다음과 같습니다. Kaggle의 최종 점수는 선택한 두 제출물 가운데 Private 점수가 높은 쪽으로
+정해지므로, 2순위는 Private에서 1순위를 앞설 가능성이 남아 있는 제출물이어야 합니다. ⑲는 Public 점수가 ⑳보다 6,714문항 기준으로 약 10문항 낮아
+Private에서 그 차이가 뒤집힐 확률이 낮은 반면, ㉒는 Public 점수가 ⑳과 동점이고 Gemma 재료를 두 QLoRA 모델의 평균으로 써서 분산이 더 작으므로
+기대값이 ⑳과 같거나 오히려 조금 높습니다. Public 점수가 ⑳보다 낮은 ㉓(0.97676)은 애초에 2순위 후보에서 제외했고, 원래 2순위였던 ⑲는 3순위
+기록으로 남겼습니다.
 
 ### 1.4 핵심 결론 세 가지
 
@@ -132,7 +135,7 @@ fold 0에서 남은 오답이 모델의 한계인지 라벨의 한계인지를 �
 | 결합 ⑲ | A 0.3 + B 0.3 + Gemma zero-shot 0.4 | 검증 불가 | 0.97616 | 계열이 다른 모델을 섞었을 때에만 ⑩을 넘었습니다. |
 | Gemma QLoRA | Gemma nf4 QLoRA, fold1234 | 0.9747 | 단독 미제출 | 사전 기준 0.9745를 통과해 결합 후보로 올렸습니다. |
 | 결합 ⑳ | A 0.3 + B 0.3 + Gemma QLoRA 0.4 | 검증 불가 | 0.97765 | 최종 1순위로 확정했습니다. |
-| 재시도 ㉒·㉓ | Gemma 전체 데이터 재학습 예측을 결합 | 검증 불가 | 0.97765, 0.97676 | 동점과 6문항 하락에 그쳐 사전 기준을 넘지 못했습니다. |
+| 재시도 ㉒·㉓ | Gemma 전체 데이터 재학습 예측을 결합 | 검증 불가 | 0.97765, 0.97676 | 1순위를 넘는 사전 기준은 넘지 못했으나, ㉒는 이후 재검토를 거쳐 최종 2순위로 채택했습니다. |
 | 네 번째 계열 ㉔ | InternVL3.5-38B nf4 QLoRA, 시각 토큰 1,280 | 0.9315 | 제출 없음 | 사전 판정 기준 0.9635에 43문항 모자라 기각했습니다. |
 | TTA 재시도 ㉕·㉖ | A와 B를 선택지 순열 TTA4 예측으로 교체 | 검증 불가 | 0.97676 | fold 0에서 5문항 올랐는데 test에서 뒤집혀 기각했습니다. |
 
@@ -235,9 +238,10 @@ Gemma의 27.9초는 27B 확대 설정의 14.9초의 약 1.9배입니다. Gemma-4
 | ⑧ | 확대 전체 데이터 p2 (B) | 검증 불가 | 0.96901 | 최종 재료 |
 | ⑩ | A와 B의 균등 결합 | 검증 불가 | 0.97110 | 미채택 |
 | ⑰ | Gemma-4-31B-it zero-shot | 0.9695 | 0.96484 | ⑲의 재료 |
-| ⑲ | A 0.3 + B 0.3 + Gemma zero-shot 0.4 | 검증 불가 | 0.97616 | 최종 2순위 |
+| ⑲ | A 0.3 + B 0.3 + Gemma zero-shot 0.4 | 검증 불가 | 0.97616 | 3순위 기록 |
 | ⑳ | A 0.3 + B 0.3 + Gemma QLoRA 0.4 | 검증 불가 | 0.97765 | 최종 1순위 |
 | ㉑ | A 0.25 + B 0.2 + Gemma QLoRA 0.55 | 검증 불가 | 0.97378 | 기각 |
+| ㉒ | A 0.3 + B 0.3 + Gemma fold 0 QLoRA 0.2 + Gemma 전체 QLoRA 0.2 | 검증 불가 | 0.97765 | 최종 2순위 |
 | ㉔ | InternVL3.5-38B nf4 QLoRA | 0.9315 | 제출 없음 | 기각 |
 
 ---
@@ -297,9 +301,12 @@ python scripts/check_submission.py --submission submission_A03_B03_Gq04.csv \
     --sample sample_submission.csv --test test.csv
 ```
 
-2순위 ⑲는 `--c`만 Gemma zero-shot 예측 `<RUN_ROOT>/gemma4_31b_base_bf16_v2_read_text/preds/test_base.csv`로
-바꾸면 만들어집니다. 제출 파일은 예측 확률 파일에서 `vqa.submit`으로 결정적으로 재생성되므로, 같은 예측 파일과 같은 `sample_submission.csv`를 넣으면
-언제나 같은 바이트의 제출 파일이 나옵니다.
+최종 2순위 ㉒는 Gemma 재료가 두 개(fold 0 QLoRA와 전체 데이터 QLoRA)로 늘어나서 세 파일까지만 받는 `scripts/blend_preds.py`로는
+재현할 수 없습니다. `gemma4_31b_ft_nf4_full_v2_read_text` run-id로 Gemma를 `split_full.json`으로 다시 학습한 다음,
+A와 B와 두 Gemma 예측 네 개의 확률을 0.3 : 0.3 : 0.2 : 0.2로 pandas에서 직접 가중 평균해서 만듭니다. 3순위 기록 ⑲는 위 명령의
+`--c`만 Gemma zero-shot 예측 `<RUN_ROOT>/gemma4_31b_base_bf16_v2_read_text/preds/test_base.csv`로 바꾸면 만들어집니다.
+제출 파일은 예측 확률 파일에서 `vqa.submit`으로 결정적으로 재생성되므로, 같은 예측 파일과 같은 `sample_submission.csv`를 넣으면 언제나
+같은 바이트의 제출 파일이 나옵니다.
 
 ### 6.3 설정 파일 목록과 테스트
 
@@ -307,8 +314,8 @@ python scripts/check_submission.py --submission submission_A03_B03_Gq04.csv \
 |---|---|
 | `configs/colab_qwen35_27b_bf16_upscale.yaml` | 최종 채택한 A와 B를 학습하고 추론한 설정입니다. |
 | `configs/colab_qwen35_27b_bf16.yaml` | 이미지 확대 이전의 기본 해상도 설정입니다. |
-| `configs/colab_gemma4_31b_bf16.yaml` | 2순위 제출물 ⑲에 들어간 Gemma-4-31B-it의 zero-shot 추론 설정입니다. |
-| `configs/colab_gemma4_31b_nf4_lora.yaml` | 1순위 제출물 ⑳에 들어간 Gemma-4-31B-it를 nf4 QLoRA로 학습한 설정입니다. |
+| `configs/colab_gemma4_31b_bf16.yaml` | 3순위 기록 ⑲에 들어간 Gemma-4-31B-it의 zero-shot 추론 설정입니다. |
+| `configs/colab_gemma4_31b_nf4_lora.yaml` | 1순위 ⑳과 2순위 ㉒에 들어간 Gemma-4-31B-it를 nf4 QLoRA로 학습한 설정입니다. |
 | `configs/colab_internvl35_8b_bf16.yaml` | 기각한 InternVL3.5-8B 실험 설정입니다. |
 | `configs/colab_internvl35_38b_nf4_lora.yaml` | 기각한 네 번째 계열 후보 ㉔의 설정입니다. |
 | `configs/lab_qwen35_9b.yaml` | 실습실 RTX 5060 Ti에서 9B를 NF4 QLoRA로 학습한 설정입니다. |
