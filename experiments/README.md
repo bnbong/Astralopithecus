@@ -2,7 +2,7 @@
 
 최종 파이프라인에 들어가지 않은 팀원들의 실험 코드를 모아 둔 폴더입니다. 어떤 시도를 했고 왜
 채택하지 않았는지를 남기려고 보관하며, 최종 제출물을 재현할 때에는 이 폴더의 코드를 실행하지
-않습니다. 재현 절차는 [`docs/submission_report.md`](../docs/submission_report.md)에 있습니다.
+않습니다. 최종 방법과 판단 근거는 [`docs/submission_report.md`](../docs/submission_report.md)에 있습니다.
 
 | 폴더 | 무엇을 했는지 | 담당 | 결과 |
 |---|---|---|---|

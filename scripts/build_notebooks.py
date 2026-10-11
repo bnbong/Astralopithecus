@@ -622,7 +622,7 @@ def nb_00():
 - `INSTALL_MODE`: 인터넷이 되면 `"online"`, 안 되면 `"offline"` 으로 둡니다.
 - `TF_TRACK`: `"tf4"` 는 transformers 4.x 환경이며 Qwen2.5-VL-3B로 오늘 바로 돌릴 수 있습니다.
   `"tf5"` 는 transformers 5.x 환경이며 Qwen3.5 계열을 돌릴 때 필요합니다. 두 환경은 conda 가상환경을
-  따로 만들어서 병행하는 것을 권장합니다. 자세한 내용은 `docs/submission_report.md` 5장을 보십시오.
+  따로 만들어서 병행하는 것을 권장합니다.
 """))
 
     cells.append(code(r'''
@@ -2217,7 +2217,7 @@ elif vram >= 35:
 else:
     raise RuntimeError(
         "감지된 VRAM이 %.1fGB입니다. 27B 경로를 포기하고 9B 경로로 전환해야 합니다. "
-        "팀 채널에 즉시 알리고 docs/submission_report.md 7.5절의 9B 경로를 따르십시오." % vram
+        "팀 채널에 즉시 알리고 9B 경로로 전환하십시오." % vram
     )
 
 print("감지된 VRAM %.1fGB -> %s (%s)" % (vram, CONFIG, PRECISION))
@@ -2483,8 +2483,7 @@ out of memory가 났습니다. `vqa.jobs start` 는 job을 띄우자마자 곧�
 4. 실행 도우미 셀 (7번 절)
 
 여기까지 실행한 다음에는 중단된 지점의 셀을 그대로 다시 실행하십시오. 명령을 고칠 필요가
-없습니다. 예측은 남은 문항부터, 학습은 마지막 checkpoint부터 이어집니다. 절별 실행 순서는
-`docs/submission_report.md` 5.4절에 더 자세히 적어 두었습니다.
+없습니다. 예측은 남은 문항부터, 학습은 마지막 checkpoint부터 이어집니다.
 """))
 
     cells.append(md("""
@@ -2587,8 +2586,7 @@ nf4로 올리고 LoRA adapter만 학습하며, 양자화에서 `model.vision_tow
 캐시를 먼저 찾고, 없으면 Drive 여유가 `MODEL_CACHE_NEED_GB` 이상일 때에만 Drive를 씁니다.
 개인 계정처럼 Drive 용량이 부족한 상황이라면 `"local"` 로 적어서 가상 머신의 로컬 디스크에
 받으십시오. 내려받는 파일은 원본 bf16 스냅샷이며 약 54GB입니다. `nf4` 로 돌리더라도 양자화는
-가중치를 GPU에 올리는 시점에 수행하므로 캐시에 필요한 용량은 줄지 않습니다. 자세한 절차는
-`docs/submission_report.md` 5.5절에 정리해 두었습니다.
+가중치를 GPU에 올리는 시점에 수행하므로 캐시에 필요한 용량은 줄지 않습니다.
 
 `RUN_RESOLUTION_COMPARE` 를 `True` 로 바꾸면 10-1절이 `RESOLUTION_COMPARE_CONFIG` 로 fold 0을
 한 번 더 추론해서 해상도만 다른 짝을 만듭니다. 프롬프트와 정밀도는 9번 절과 같게 둡니다.
@@ -3029,7 +3027,7 @@ if VRAM_GB < VRAM_MIN_INFER_GB:
         "감지된 VRAM이 %.1fGB입니다. 이 설정의 가중치는 bf16으로 약 %.0fGB이고 nf4로 "
         "양자화해도 약 %.0fGB이므로, %.1fGB 미만에서는 추론도 완주하지 못합니다. 런타임 "
         "유형이 GPU인지 먼저 확인하시고, GPU가 맞다면 런타임을 끊고 다시 연결해서 더 큰 "
-        "GPU를 받으십시오. 계속 작은 GPU만 배정된다면 docs/submission_report.md 7.5절의 9B 경로로 "
+        "GPU를 받으십시오. 계속 작은 GPU만 배정된다면 9B 경로로 "
         "전환해야 합니다."
         % (VRAM_GB, WEIGHTS_GB, WEIGHTS_GB / 3.6, VRAM_MIN_INFER_GB)
     )

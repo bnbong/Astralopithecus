@@ -18,7 +18,11 @@ _이미지 속 글자를 읽어서 네 개의 선택지 가운데 정답 하나�
 
 ## 소개
 
-SSAFY 16기 2회차 AI 챌린지는 이미지와 한국어 질문을 보고 네 개의 선택지 가운데 정답을 고르는 객관식 VQA 대회였습니다. 팀 Astralopithecus는 2026년 9월 26일 기준 Public 0.97765를 기록했고, 최종 1순위와 2순위 제출물이 이 점수로 동점이었습니다. 이 저장소는 팀이 만든 코드와 실험 기록을 남겨 두려고 보존하는 저장소입니다.
+SSAFY 16기 2회차 AI 챌린지에 팀 Astralopithecus가 제출한 결과물 저장소입니다.
+
+Public 0.97765를 기록했습니다.
+
+팀 이름 Astralopithecus는 ChatGPT의 Astra와 Australopithecus(오스트랄로피테쿠스)를 합친 이름입니다.
 
 ## 팀
 
@@ -70,12 +74,12 @@ fold 0은 train을 이미지 기준으로 나눈 고정 검증셋 1,344문항에
 
 ## 이 저장소에 포함하지 않은 것
 
-대회 원본 데이터(이미지와 CSV), 모델 checkpoint와 LoRA adapter 가중치, 제출 CSV는 라이선스와 용량 문제 때문에 이 저장소에 포함하지 않았습니다. 분할 파일과 id 목록은 이미지나 질문 본문을 담고 있지 않아서 포함했습니다. 다만 dev 문항의 다수결 라벨 파일(`fold_csv_files/dev_aux.csv`)은 정답에 준하는 값을 담고 있어서 함께 제외했습니다.
+대회 원본 데이터(이미지와 CSV), 모델 checkpoint와 LoRA adapter 가중치, 제출 CSV는 라이선스와 용량 문제 때문에 이 저장소에 포함하지 않았습니다.
 
 ## 문서
 
 | 문서                                                             | 내용                                                         |
 | ---------------------------------------------------------------- | ------------------------------------------------------------ |
-| [`docs/submission_report.md`](docs/submission_report.md)         | 대회에 제출한 보고서입니다.                                  |
+| [`docs/submission_report.md`](docs/submission_report.md)         | 대회 제출 보고서를 결과 기록 목적으로 축약한 문서입니다.                                  |
 | [`results/README.md`](results/README.md)                         | 날짜별 실험의 설정과 측정값, 채택 여부를 정리한 기록입니다.  |
 | [`docs/discussion_fla_kernel.md`](docs/discussion_fla_kernel.md) | fla 가속 커널이 빠졌을 때 학습이 느려지는 현상을 추적한 기록입니다. |
