@@ -505,7 +505,7 @@ fold 0이 오르면 Public도 올랐고, fold 0에서 유의하지 않았던 변
 transformers 5.16의 Qwen3.5 Gated DeltaNet은 `chunk_gated_delta_rule`을 Hub 커널로 부르는데, `fla`
 패키지가 없으면 예외 없이 PyTorch 참조 구현으로 내려갑니다. 그 결과 27B LoRA의 optimizer step이
 58초에서 13.5초로 약 4.3배 차이가 났고, 경고 로그만 남아서 속도를 직접 재기 전에는 알아채기
-어려웠습니다. 추적 과정은 [`docs/discussion_fla_kernel.md`](discussion_fla_kernel.md)에 있습니다.
+어려웠습니다.
 
 ---
 
