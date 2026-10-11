@@ -622,7 +622,7 @@ def nb_00():
 - `INSTALL_MODE`: 인터넷이 되면 `"online"`, 안 되면 `"offline"` 으로 둡니다.
 - `TF_TRACK`: `"tf4"` 는 transformers 4.x 환경이며 Qwen2.5-VL-3B로 오늘 바로 돌릴 수 있습니다.
   `"tf5"` 는 transformers 5.x 환경이며 Qwen3.5 계열을 돌릴 때 필요합니다. 두 환경은 conda 가상환경을
-  따로 만들어서 병행하는 것을 권장합니다. 자세한 절차는 `docs/lab_setup.md` 를 보십시오.
+  따로 만들어서 병행하는 것을 권장합니다. 자세한 내용은 `docs/submission_report.md` 5장을 보십시오.
 """))
 
     cells.append(code(r'''
@@ -820,7 +820,7 @@ vqa가 읽는 형식으로 바꿔서 내용 해시와 함께 배포하는 것입
 
 공식 분할은 팀이 이미 확정했습니다. 검증은 `fold_csv_files/val_fold0.csv`의 fold 0 1,344문항이고,
 학습은 `fold_csv_files/train_fold1234.csv`의 5,358문항입니다. 학습 파일에서는 test와 이미지가
-동일한 train 24문항을 빼 두었습니다. 분할 방식은 `docs/data_split_by_team.md`에
+동일한 train 24문항을 빼 두었습니다. 분할 방식은 `docs/submission_report.md` 2.3절에
 정리되어 있습니다. 이 노트북은 그 두 파일을 `artifacts/data/split_fold0.json` 하나로 합칩니다.
 검증 500문항을 쓰던 `split_v1.json`은 폐기했으니 새 실행에서는 쓰지 마십시오.
 
@@ -2217,7 +2217,7 @@ elif vram >= 35:
 else:
     raise RuntimeError(
         "감지된 VRAM이 %.1fGB입니다. 27B 경로를 포기하고 9B 경로로 전환해야 합니다. "
-        "팀 채널에 즉시 알리고 docs/README_team.md의 대체 경로를 따르십시오." % vram
+        "팀 채널에 즉시 알리고 docs/submission_report.md 7.5절의 9B 경로를 따르십시오." % vram
     )
 
 print("감지된 VRAM %.1fGB -> %s (%s)" % (vram, CONFIG, PRECISION))
@@ -2483,8 +2483,8 @@ out of memory가 났습니다. `vqa.jobs start` 는 job을 띄우자마자 곧�
 4. 실행 도우미 셀 (7번 절)
 
 여기까지 실행한 다음에는 중단된 지점의 셀을 그대로 다시 실행하십시오. 명령을 고칠 필요가
-없습니다. 예측은 남은 문항부터, 학습은 마지막 checkpoint부터 이어집니다. 상황별 대응은
-`docs/colab_survival.md` 에 더 자세히 적어 두었습니다.
+없습니다. 예측은 남은 문항부터, 학습은 마지막 checkpoint부터 이어집니다. 절별 실행 순서는
+`docs/submission_report.md` 5.4절에 더 자세히 적어 두었습니다.
 """))
 
     cells.append(md("""
@@ -2508,14 +2508,14 @@ out of memory가 났습니다. `vqa.jobs start` 는 job을 띄우자마자 곧�
 모델을 Qwen3.8-27B로 바꾸어 비교하려면 `CONFIG = QWEN38_UPSCALE_CONFIG` 라고 적으십시오.
 해상도와 LoRA 설정과 학습 하이퍼파라미터는 위의 확대본과 같고 모델만 다르므로, 두 run의
 차이를 모델 하나로 설명할 수 있습니다. 모델 식별자와 revision은 5번 절이 이 설정 파일에서
-직접 읽으므로 파라미터 셀의 `MODEL_ID` 를 따로 고칠 필요가 없습니다. 절차와 예상 시간은
-`docs/colab_personal_account.md` 의 Qwen3.8-27B 비교 실험 절에 정리해 두었습니다.
+직접 읽으므로 파라미터 셀의 `MODEL_ID` 를 따로 고칠 필요가 없습니다. 비교 결과는
+`docs/submission_report.md` 의 3.9절에 정리해 두었습니다.
 
 계통이 다른 모델의 확률을 얻어 27B 결과와 섞으려면 `CONFIG = INTERNVL_CONFIG` 라고 적고,
 `PROMPT_ID` 를 `"v2_read_text"` 로, `TRAIN_SCOPE` 를 `"fold0"` 으로 두십시오. InternVL3.5-8B는
 zero-shot 추론만 검증했으므로 학습 절은 건너뛰고 9번 절의 원본 추론만 돌립니다. 가중치가
 16GB뿐이라 5번 절의 VRAM 하한이 함께 내려가고, 24GB급 GPU에서도 bf16으로 들어갑니다.
-결합 방법은 docs/README_team.md 의 "InternVL3.5-8B 비교 실험" 절에 적어 두었습니다.
+결합 결과는 docs/submission_report.md 의 3.9절에 적어 두었습니다.
 
 `TRAIN_SCOPE` 는 학습에 쓰는 문항의 범위를 정합니다. 기본값인 `"fold0"` 은 fold 1~4의
 5,358문항만 학습하고 fold 0의 1,344문항을 검증으로 남겨 둡니다. 설정을 비교하고 학습 효과를
@@ -2559,8 +2559,8 @@ adapter를 빌려 옵니다. epoch을 2로 올렸을 때 실제로 좋아지는�
 틀리는 문항이 달라져서 결합에서 이득을 볼 여지가 있습니다. 해상도는 `min_pixels` 가 아니라
 설정 파일의 `processor_kwargs.max_soft_tokens` 로 정하며, 허용되는 값은 70, 140, 280, 560,
 1120 다섯 개뿐입니다. 가중치가 62GB여서 80GB A100에서 bf16 추론은 들어가지만, 5번 절이 학습
-하한을 82GB로 잡으므로 그 가상 머신에서는 학습을 막고 추론만 허용합니다. 절차와 예상 시간은
-`docs/colab_personal_account.md` 의 Gemma-4-31B 비교 실험 절에 정리해 두었습니다.
+하한을 82GB로 잡으므로 그 가상 머신에서는 학습을 막고 추론만 허용합니다. 비교 결과는
+`docs/submission_report.md` 의 3.12절에 정리해 두었습니다.
 
 같은 Gemma-4를 학습까지 하려면 `CONFIG = GEMMA4_QLORA_CONFIG` 라고 적으십시오. 가중치를 nf4로
 양자화해서 올리고 LoRA adapter만 bf16으로 학습하는 설정이며, 5번 절이 읽는 `weights_gb` 가
@@ -2588,7 +2588,7 @@ nf4로 올리고 LoRA adapter만 학습하며, 양자화에서 `model.vision_tow
 개인 계정처럼 Drive 용량이 부족한 상황이라면 `"local"` 로 적어서 가상 머신의 로컬 디스크에
 받으십시오. 내려받는 파일은 원본 bf16 스냅샷이며 약 54GB입니다. `nf4` 로 돌리더라도 양자화는
 가중치를 GPU에 올리는 시점에 수행하므로 캐시에 필요한 용량은 줄지 않습니다. 자세한 절차는
-`docs/colab_personal_account.md` 에 정리해 두었습니다.
+`docs/submission_report.md` 5.5절에 정리해 두었습니다.
 
 `RUN_RESOLUTION_COMPARE` 를 `True` 로 바꾸면 10-1절이 `RESOLUTION_COMPARE_CONFIG` 로 fold 0을
 한 번 더 추론해서 해상도만 다른 짝을 만듭니다. 프롬프트와 정밀도는 9번 절과 같게 둡니다.
@@ -3029,7 +3029,7 @@ if VRAM_GB < VRAM_MIN_INFER_GB:
         "감지된 VRAM이 %.1fGB입니다. 이 설정의 가중치는 bf16으로 약 %.0fGB이고 nf4로 "
         "양자화해도 약 %.0fGB이므로, %.1fGB 미만에서는 추론도 완주하지 못합니다. 런타임 "
         "유형이 GPU인지 먼저 확인하시고, GPU가 맞다면 런타임을 끊고 다시 연결해서 더 큰 "
-        "GPU를 받으십시오. 계속 작은 GPU만 배정된다면 docs/README_team.md 의 9B 경로로 "
+        "GPU를 받으십시오. 계속 작은 GPU만 배정된다면 docs/submission_report.md 7.5절의 9B 경로로 "
         "전환해야 합니다."
         % (VRAM_GB, WEIGHTS_GB, WEIGHTS_GB / 3.6, VRAM_MIN_INFER_GB)
     )

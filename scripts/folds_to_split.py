@@ -3,7 +3,7 @@
 
 입력은 팀원이 만든 `fold_csv_files/val_fold0.csv`(1,344문항)와
 `fold_csv_files/train_fold1234.csv`(5,358문항)다. 분할 방식은
-`docs/data_split_by_team.md`에 정리되어 있다.
+`docs/submission_report.md` 2.3절에 정리되어 있다.
 
 출력은 다음 세 파일이다.
 

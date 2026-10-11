@@ -46,7 +46,10 @@ artifacts/submissions/
 # ---------------------------------------------------------------------------
 experiments/ocr/ocr_cache.json
 experiments/ocr/fold0_name_price_number.csv
-experiments/ocr/test_result/ocr_verification_result.csv
+# OCR 검증 결과 폴더. 데이터 파생 CSV가 쌓이므로 폴더째 제외한다.
+experiments/ocr/test_result/
+# dev 문항의 다수결 라벨(정답에 준하는 값)이라 공개 저장소에서 뺀다.
+fold_csv_files/dev_aux.csv
 
 # 제출 후보와 예측 확률, 오답 목록
 submission*.csv

@@ -295,7 +295,10 @@ def test_committed_fold0_dev_split_matches_the_committed_fold0_split() -> None:
         with path.open(encoding="utf-8-sig", newline="") as handle:
             return [row["id"].strip() for row in csv_mod.DictReader(handle)]
 
-    aux_ids = read_id_column(ROOT / "fold_csv_files" / "dev_aux.csv")
+    aux_path = ROOT / "fold_csv_files" / "dev_aux.csv"
+    if not aux_path.exists():
+        pytest.skip("fold_csv_files/dev_aux.csv는 공개 저장소에 포함하지 않아 로컬에만 있습니다.")
+    aux_ids = read_id_column(aux_path)
     excluded = read_id_column(ROOT / "fold_csv_files" / "exclude_dev_overlap_test.csv")
     assert dev["dev_excluded_overlap_test_ids"] == sorted(excluded)
     # 제외 목록의 문항만 빠지고 나머지는 dev_aux.csv의 순서를 지킨다.

@@ -19,5 +19,5 @@ OCR이 읽어 낸 글자를 담고 있습니다. 이 세 파일은 저장소에�
 `eval_tools/check_submission.py`는 유수정이 작성한 초기 검사기입니다. 최종 파이프라인이 쓰는
 검사기는 이준혁이 작성한 `scripts/check_submission.py`이며, 두 파일은 이름만 같고 서로 다른
 구현입니다. 확률 컬럼 이름도 달라서 `eval_tools/`의 도구는 `prob_a`부터 `prob_d`까지를 쓰고
-`vqa` 패키지와 `scripts/`는 `p_a`부터 `p_d`까지를 씁니다. 두 형식을 바꾸려면
-`python scripts/convert_preds.py`를 쓰십시오.
+`vqa` 패키지와 `scripts/`는 `p_a`부터 `p_d`까지를 씁니다. 두 형식 사이의 변환은
+`scripts/convert_preds.py`가 담당합니다.
