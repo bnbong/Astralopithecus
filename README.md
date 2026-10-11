@@ -82,4 +82,3 @@ fold 0은 train을 이미지 기준으로 나눈 고정 검증셋 1,344문항에
 | ---------------------------------------------------------------- | ------------------------------------------------------------ |
 | [`docs/submission_report.md`](docs/submission_report.md)         | 대회 제출 보고서를 결과 기록 목적으로 축약한 문서입니다.                                  |
 | [`results/README.md`](results/README.md)                         | 날짜별 실험의 설정과 측정값, 채택 여부를 정리한 기록입니다.  |
-| [`docs/discussion_fla_kernel.md`](docs/discussion_fla_kernel.md) | fla 가속 커널이 빠졌을 때 학습이 느려지는 현상을 추적한 기록입니다. |
